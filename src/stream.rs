@@ -1,17 +1,33 @@
 use std::{
+    collections::VecDeque,
     pin::Pin,
     task::{Context, Poll},
 };
 
 use futures::{
-    AsyncRead, AsyncWrite, Stream,
+    AsyncRead, AsyncWrite, SinkExt, Stream, StreamExt,
     channel::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded},
 };
 
-use crate::{chunk::ChunkView, frame::FrameStreamEvent};
+use crate::{
+    chunk::ChunkView,
+    frame::FrameStreamEvent,
+    packet::{Flags, FlagsBuilder},
+};
 
 /// Initial per-stream flow-control window in bytes.
 pub const INITIAL_WINDOW: u32 = 256 * 1024;
+
+struct State {
+    local: bool,
+    remote: bool,
+}
+
+impl State {
+    fn is_closed(&self) -> bool {
+        !self.local && !self.remote
+    }
+}
 
 /// Internal state machine that turns stream I/O into [`FrameStreamEvent`] values.
 ///
@@ -19,26 +35,112 @@ pub const INITIAL_WINDOW: u32 = 256 * 1024;
 /// - Feeding inbound events via [`YamuxStreamHead::on_input`].
 /// - Polling it as a [`Stream`] to obtain outbound events.
 pub struct YamuxStreamHead {
-    tx: Option<UnboundedSender<ChunkView>>,
-    rx: Option<Receiver<ChunkView>>,
+    tx: UnboundedSender<ChunkView>,
+    rx: Receiver<ChunkView>,
+    state: State,
+    outs: VecDeque<FrameStreamEvent>,
+    recv_state: Option<usize>,
 }
 
 impl YamuxStreamHead {
-    fn new(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
-        Self { tx: Some(tx), rx: Some(rx) }
+    fn open(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
+        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::default().ack(true).build().expect("should build ok"), INITIAL_WINDOW);
+        Self {
+            tx,
+            rx,
+            state: State { local: true, remote: false },
+            outs: VecDeque::from_iter([init_pkt]),
+            recv_state: None,
+        }
     }
 
     /// Handles an incoming frame for this stream.
-    pub fn on_input(&mut self, _event: FrameStreamEvent) {
-        todo!()
+    pub fn on_input(&mut self, event: FrameStreamEvent) -> std::io::Result<()> {
+        match event {
+            FrameStreamEvent::Data(flags, size) => {
+                if self.recv_state.is_some() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "received data while already receiving data"));
+                }
+
+                self.handle_flag(flags);
+                self.recv_state = Some(size as usize);
+
+                Ok(())
+            }
+            FrameStreamEvent::DataChunk(chunk_view) => {
+                if let Some(recv_state) = &mut self.recv_state {
+                    if *recv_state < chunk_view.len() {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "received data chunk size is larger than expected"));
+                    }
+                    *recv_state -= chunk_view.len();
+                    self.tx.unbounded_send(chunk_view).expect("should send ok");
+
+                    if *recv_state == 0 {
+                        self.recv_state = None;
+                    }
+
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "received data chunk while not receiving data"))
+                }
+            }
+            FrameStreamEvent::WindowUpdate(flags, _delta) => {
+                self.handle_flag(flags);
+
+                Ok(())
+            }
+        }
+    }
+
+    fn handle_flag(&mut self, flag: Flags) {
+        if flag.ack {
+            log::info!("[YamuxStreamHead] received ack => remote opened");
+            self.state.remote = true;
+        }
+
+        if flag.rst {
+            log::info!("[YamuxStreamHead] received rst => both local and remote disabled");
+            self.state.local = false;
+            self.state.remote = false;
+        }
+
+        if flag.fin {
+            log::warn!("[YamuxStreamHead] received fin => remote closed, send empty chunk");
+            self.state.remote = false;
+            self.tx.unbounded_send(vec![].into()).expect("should send ok");
+        }
     }
 }
 
 impl Stream for YamuxStreamHead {
     type Item = FrameStreamEvent;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        todo!()
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        if this.state.is_closed() {
+            //both local and remote are closed => stream is closed
+            return Poll::Ready(None);
+        }
+
+        while let Poll::Ready(event) = this.rx.poll_next_unpin(cx) {
+            match event {
+                Some(chunk) => {
+                    this.outs.push_back(FrameStreamEvent::Data(Flags::empty(), chunk.len() as u32));
+                    this.outs.push_back(FrameStreamEvent::DataChunk(chunk));
+                }
+                None => {
+                    log::warn!("[YamuxStreamHead] rx unexpected None");
+                    return Poll::Ready(None);
+                }
+            }
+        }
+
+        if let Some(out) = this.outs.pop_front() {
+            Poll::Ready(Some(out))
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -50,28 +152,65 @@ pub struct YamuxStream {
 }
 
 /// Creates a paired head/stream used by the session and user-facing API.
-pub(crate) fn build_stream() -> (YamuxStreamHead, YamuxStream) {
+pub(crate) fn open_stream() -> (YamuxStreamHead, YamuxStream) {
     let (tx, rx) = channel(1);
     let (tx2, rx2) = unbounded();
-    (YamuxStreamHead::new(tx2, rx), YamuxStream { tx, rx: rx2, recv_chunk: None })
+    (YamuxStreamHead::open(tx2, rx), YamuxStream { tx, rx: rx2, recv_chunk: None })
 }
 
 impl AsyncRead for YamuxStream {
-    fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
-        todo!()
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+
+        if this.recv_chunk.is_none() {
+            if let Poll::Ready(event) = this.rx.poll_next_unpin(cx) {
+                if let Some(chunk) = event {
+                    this.recv_chunk = Some((chunk, 0));
+                } else {
+                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "internal channel closed")));
+                }
+            }
+        }
+
+        if let Some((chunk, offset)) = &mut this.recv_chunk {
+            let read_len = (chunk.len() - *offset).min(buf.len());
+            buf[..read_len].copy_from_slice(&chunk.as_slice()[*offset..*offset + read_len]);
+            *offset += read_len;
+            if *offset == chunk.len() {
+                this.recv_chunk = None;
+            }
+            return Poll::Ready(Ok(read_len));
+        }
+
+        Poll::Pending
     }
 }
 
 impl AsyncWrite for YamuxStream {
-    fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &[u8]) -> Poll<std::io::Result<usize>> {
-        todo!()
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+
+        if let Poll::Ready(event) = this.tx.poll_ready(cx) {
+            if let Err(e) = event {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
+            }
+            let send_len = buf.len().min(4096);
+            if let Err(e) = this.tx.start_send(buf[..send_len].to_vec().into()) {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
+            }
+            return Poll::Ready(Ok(send_len));
+        }
+
+        Poll::Pending
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        todo!()
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        this.tx.poll_flush_unpin(cx).map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        todo!()
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        this.tx.poll_close_unpin(cx).map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
     }
 }

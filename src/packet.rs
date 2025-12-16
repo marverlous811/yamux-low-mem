@@ -1,3 +1,4 @@
+use derive_builder::Builder;
 use derive_more::Display;
 use thiserror::Error;
 
@@ -83,12 +84,16 @@ impl StreamID {
 }
 
 /// Yamux control flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Builder)]
 #[display("Flags(syn: {syn}, ack: {ack}, fin: {fin}, rst: {rst})")]
 pub struct Flags {
+    #[builder(default = "false")]
     pub syn: bool,
+    #[builder(default = "false")]
     pub ack: bool,
+    #[builder(default = "false")]
     pub fin: bool,
+    #[builder(default = "false")]
     pub rst: bool,
 }
 
@@ -96,6 +101,11 @@ impl Flags {
     /// Creates a new set of flags.
     pub fn new(syn: bool, ack: bool, fin: bool, rst: bool) -> Self {
         Self { syn, ack, fin, rst }
+    }
+
+    /// Creates an empty set of flags.
+    pub fn empty() -> Self {
+        Self::new(false, false, false, false)
     }
 
     /// Converts the bitfield into flags.

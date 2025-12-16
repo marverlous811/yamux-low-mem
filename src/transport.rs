@@ -50,13 +50,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame> for YamuxTransport<T> {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
 
-        this.poll_write(cx)?;
-
-        // if we have buffer more than max_writer_buffer, we need to wait for the next poll
-        if this.writer.buffer_mut().len() >= this.max_writer_buffer {
-            return Poll::Pending;
-        } else {
-            return Poll::Ready(Ok(()));
+        match this.poll_write(cx)? {
+            Poll::Ready(_) => Poll::Ready(Ok(())),
+            Poll::Pending => {
+                // if we have buffer more than max_writer_buffer, we need to wait for the next poll
+                if this.writer.buffer_mut().len() >= this.max_writer_buffer {
+                    return Poll::Pending;
+                } else {
+                    return Poll::Ready(Ok(()));
+                }
+            }
         }
     }
 
@@ -69,26 +72,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame> for YamuxTransport<T> {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
 
-        this.poll_write(cx)?;
-
-        // if we have buffer more than max_writer_buffer, we need to wait for the next poll
-        if this.writer.buffer_mut().len() > 0 {
-            return Poll::Pending;
-        } else {
-            return Poll::Ready(Ok(()));
-        }
+        this.poll_write(cx)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
 
-        this.poll_write(cx)?;
-
-        // if we have buffer more than max_writer_buffer, we need to wait for the next poll
-        if this.writer.buffer_mut().len() > 0 {
-            Poll::Pending
-        } else {
-            Pin::new(&mut this.stream).poll_close(cx)
+        match this.poll_write(cx)? {
+            Poll::Ready(_) => Pin::new(&mut this.stream).poll_close(cx),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

@@ -149,13 +149,23 @@ pub enum FrameStreamEvent {
     WindowUpdate(Flags, u32),
 }
 
+impl FrameStreamEvent {
+    pub fn flags(&self) -> Option<Flags> {
+        match self {
+            Self::Data(flags, _) | Self::WindowUpdate(flags, _) => Some(*flags),
+            _ => None,
+        }
+    }
+}
+
 /// Session-directed events.
 #[derive(Debug, Clone, PartialEq, Eq, Display)]
 pub enum FrameSessionEvent {
     /// Ping frame (opaque payload not yet modeled).
-    Ping(Flags),
+    #[display("Ping({_0}, {_1})")]
+    Ping(Flags, u32),
     /// GoAway frame (error payload not yet modeled).
-    GoAway(Flags),
+    GoAway(u32),
 }
 
 /// Yamux frame variants.
@@ -184,8 +194,8 @@ impl Frame {
         match header.type_ {
             FrameType::Data => Ok(Some(Frame::Stream(header.stream_id, FrameStreamEvent::Data(header.flags, header.length)))),
             FrameType::WindowUpdate => Ok(Some(Frame::Stream(header.stream_id, FrameStreamEvent::WindowUpdate(header.flags, header.length)))),
-            FrameType::Ping => Ok(Some(Frame::Session(FrameSessionEvent::Ping(header.flags)))),
-            FrameType::GoAway => Ok(Some(Frame::Session(FrameSessionEvent::GoAway(header.flags)))),
+            FrameType::Ping => Ok(Some(Frame::Session(FrameSessionEvent::Ping(header.flags, header.length)))),
+            FrameType::GoAway => Ok(Some(Frame::Session(FrameSessionEvent::GoAway(header.length)))),
         }
     }
 
@@ -196,11 +206,11 @@ impl Frame {
     pub fn write(&self, buffer: &mut impl ChunkBufferWriter) {
         match self {
             Frame::Session(event) => match event {
-                FrameSessionEvent::Ping(flags) => {
-                    Header::new(FrameType::Ping, *flags, StreamID(0), 0).write(buffer);
+                FrameSessionEvent::Ping(flags, code) => {
+                    Header::new(FrameType::Ping, *flags, StreamID(0), *code).write(buffer);
                 }
-                FrameSessionEvent::GoAway(flags) => {
-                    Header::new(FrameType::GoAway, *flags, StreamID(0), 0).write(buffer);
+                FrameSessionEvent::GoAway(code) => {
+                    Header::new(FrameType::GoAway, Flags::empty(), StreamID(0), *code).write(buffer);
                 }
             },
             Frame::Stream(stream_id, event) => match event {

@@ -52,7 +52,7 @@ pub struct YamuxStreamHead {
 
 impl YamuxStreamHead {
     fn open(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
-        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::default().ack(true).build().expect("should build ok"), INITIAL_WINDOW);
+        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::default().syn(true).build().expect("should build ok"), INITIAL_WINDOW);
         Self {
             tx,
             rx,
@@ -66,14 +66,18 @@ impl YamuxStreamHead {
         }
     }
 
-    /// Handle tick (send window update if needed)
-    pub fn tick(&mut self) {
-        if self.window.recv > 0 {
-            self.outs.push_back(FrameStreamEvent::WindowUpdate(
-                FlagsBuilder::default().ack(true).build().expect("should build ok"),
-                self.window.recv as u32,
-            ));
-            self.window.recv = 0;
+    fn accept(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
+        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::default().ack(true).build().expect("should build ok"), INITIAL_WINDOW);
+        Self {
+            tx,
+            rx,
+            state: State { local: true, remote: true },
+            window: Window {
+                send: INITIAL_WINDOW as usize,
+                recv: INITIAL_WINDOW as usize,
+            },
+            outs: VecDeque::from_iter([init_pkt]),
+            recv_state: None,
         }
     }
 
@@ -97,14 +101,14 @@ impl YamuxStreamHead {
                     }
 
                     *recv_state -= chunk_view.len();
-                    self.window.recv += chunk_view.len();
-
+                    let received_len = chunk_view.len();
                     self.tx.unbounded_send(chunk_view).expect("should send ok");
 
                     if *recv_state == 0 {
                         self.recv_state = None;
                     }
 
+                    self.mark_received_bytes(received_len);
                     Ok(())
                 } else {
                     Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "received data chunk while not receiving data"))
@@ -135,6 +139,18 @@ impl YamuxStreamHead {
             log::warn!("[YamuxStreamHead] received fin => remote closed, send empty chunk");
             self.state.remote = false;
             self.tx.unbounded_send(vec![].into()).expect("should send ok");
+        }
+    }
+
+    fn mark_received_bytes(&mut self, received: usize) {
+        self.window.recv += received;
+        // auto send WindowUpdate when we received INITIAL_WINDOW
+        if self.window.recv + CHUNK_CAPACITY >= INITIAL_WINDOW as usize / 2 {
+            self.outs.push_back(FrameStreamEvent::WindowUpdate(
+                FlagsBuilder::default().ack(true).build().expect("should build ok"),
+                self.window.recv as u32,
+            ));
+            self.window.recv = 0;
         }
     }
 }
@@ -183,13 +199,6 @@ pub struct YamuxStream {
     tx: Sender<ChunkView>,
     rx: UnboundedReceiver<ChunkView>,
     recv_chunk: Option<(ChunkView, usize)>,
-}
-
-/// Creates a paired head/stream used by the session and user-facing API.
-pub(crate) fn open_stream() -> (YamuxStreamHead, YamuxStream) {
-    let (tx, rx) = channel(1);
-    let (tx2, rx2) = unbounded();
-    (YamuxStreamHead::open(tx2, rx), YamuxStream { tx, rx: rx2, recv_chunk: None })
 }
 
 impl AsyncRead for YamuxStream {
@@ -247,4 +256,18 @@ impl AsyncWrite for YamuxStream {
         let this = self.get_mut();
         this.tx.poll_close_unpin(cx).map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
     }
+}
+
+/// Creates a paired head/stream used by the session and user-facing API.
+pub(crate) fn open_stream() -> (YamuxStreamHead, YamuxStream) {
+    let (tx, rx) = channel(1);
+    let (tx2, rx2) = unbounded();
+    (YamuxStreamHead::open(tx2, rx), YamuxStream { tx, rx: rx2, recv_chunk: None })
+}
+
+/// Creates a paired head/stream used by the session and user-facing API.
+pub(crate) fn accept_stream() -> (YamuxStreamHead, YamuxStream) {
+    let (tx, rx) = channel(1);
+    let (tx2, rx2) = unbounded();
+    (YamuxStreamHead::accept(tx2, rx), YamuxStream { tx, rx: rx2, recv_chunk: None })
 }

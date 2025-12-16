@@ -12,7 +12,7 @@ use crate::{
 #[derive(Debug)]
 struct PendingPayload {
     stream_id: StreamID,
-    remain: u32,
+    remain: usize,
 }
 
 /// Stateful reader that yields metadata and payload chunks separately.
@@ -40,8 +40,39 @@ impl<R: ChunkBufferReader + ChunkBufferSink> FrameReader<R> {
     ///
     /// Returns `Ok(None)` when more data is required to produce the next item.
     pub fn next_frame(&mut self) -> Result<Option<Frame>, ParserError> {
-        todo!()
+        // We need to continue reading data chunks utils it finishes
+        if let Some(pending) = self.pending.as_mut() {
+            match self.buffer.next_chunk(pending.remain) {
+                None => return Ok(None),
+                Some(chunk) => {
+                    pending.remain -= chunk.len();
+                    let output = Frame::Stream(pending.stream_id, FrameStreamEvent::DataChunk(chunk));
+                    if pending.remain == 0 {
+                        self.pending = None;
+                    }
+                    return Ok(Some(output));
+                }
+            }
+        }
+
+        // Parse new frame from buffer
+        match Frame::read(&mut self.buffer) {
+            Ok(Some(frame)) => {
+                if let Frame::Stream(stream_id, FrameStreamEvent::Data(_, size)) = frame {
+                    // Start tracking this data frame for chunked delivery
+                    self.pending = Some(PendingPayload { stream_id, remain: size as usize });
+                }
+                return Ok(Some(frame));
+            }
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        }
     }
+}
+
+pub enum FrameWriterError {
+    InvalidStreamId,
+    UnexpectedFrameType,
 }
 
 /// Stateful writer that owns a buffer and enforces header/data sequencing.
@@ -72,8 +103,33 @@ impl<W: ChunkBufferWriter + ChunkBufferSource> FrameWriter<W> {
     }
 
     /// Writes the next frame or chunk into the owned buffer, enforcing payload sizes.
-    pub fn write(&mut self, _frame: Frame) -> Result<(), ParserError> {
-        todo!()
+    pub fn write(&mut self, frame: Frame) -> Result<(), FrameWriterError> {
+        if let Some(pending) = self.pending.as_mut() {
+            // Handle pending data chunk
+            if let Frame::Stream(stream_id, FrameStreamEvent::DataChunk(chunk)) = &frame {
+                if *stream_id == pending.stream_id {
+                    pending.remain -= chunk.len();
+                    if pending.remain == 0 {
+                        self.pending = None;
+                    }
+                } else {
+                    // Unexpected stream ID for pending data
+                    return Err(FrameWriterError::InvalidStreamId);
+                }
+            } else {
+                // Non-data frame while waiting for data chunk
+                // This is an error - we should only receive data chunks when we have a pending payload
+                return Err(FrameWriterError::UnexpectedFrameType);
+            }
+        } else if let Frame::Stream(stream_id, FrameStreamEvent::Data(_, size)) = &frame {
+            // Track pending data for chunked delivery
+            self.pending = Some(PendingPayload {
+                stream_id: *stream_id,
+                remain: *size as usize,
+            });
+        }
+        frame.write(&mut self.buffer);
+        Ok(())
     }
 }
 
@@ -81,20 +137,20 @@ impl<W: ChunkBufferWriter + ChunkBufferSource> FrameWriter<W> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameStreamEvent {
     /// Announces an incoming data payload of `size` bytes.
-    Data { flags: Flags, size: u32 },
+    Data(Flags, u32),
     /// Carries a slice of data for the current payload.
-    DataChunk { remain: u32, chunk: ChunkView },
+    DataChunk(ChunkView),
     /// Updates the flow-control window by `delta`.
-    WindowUpdate { flags: Flags, delta: u32 },
+    WindowUpdate(Flags, u32),
 }
 
 /// Session-directed events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameSessionEvent {
     /// Ping frame (opaque payload not yet modeled).
-    Ping { flags: Flags },
+    Ping(Flags),
     /// GoAway frame (error payload not yet modeled).
-    GoAway { flags: Flags },
+    GoAway(Flags),
 }
 
 /// Yamux frame variants.
@@ -103,7 +159,7 @@ pub enum Frame {
     /// Session-level control event.
     Session(FrameSessionEvent),
     /// Stream-level event tagged with the destination stream.
-    Stream { stream_id: StreamID, event: FrameStreamEvent },
+    Stream(StreamID, FrameStreamEvent),
 }
 
 impl Frame {
@@ -119,57 +175,36 @@ impl Frame {
         };
 
         match header.type_ {
-            FrameType::Data => Ok(Some(Frame::Stream {
-                stream_id: header.stream_id,
-                event: FrameStreamEvent::Data {
-                    flags: header.flags,
-                    size: header.length,
-                },
-            })),
-            FrameType::WindowUpdate => Ok(Some(Frame::Stream {
-                stream_id: header.stream_id,
-                event: FrameStreamEvent::WindowUpdate {
-                    flags: header.flags,
-                    delta: header.length,
-                },
-            })),
-            FrameType::Ping => Ok(Some(Frame::Session(FrameSessionEvent::Ping { flags: header.flags }))),
-            FrameType::GoAway => Ok(Some(Frame::Session(FrameSessionEvent::GoAway { flags: header.flags }))),
+            FrameType::Data => Ok(Some(Frame::Stream(header.stream_id, FrameStreamEvent::Data(header.flags, header.length)))),
+            FrameType::WindowUpdate => Ok(Some(Frame::Stream(header.stream_id, FrameStreamEvent::WindowUpdate(header.flags, header.length)))),
+            FrameType::Ping => Ok(Some(Frame::Session(FrameSessionEvent::Ping(header.flags)))),
+            FrameType::GoAway => Ok(Some(Frame::Session(FrameSessionEvent::GoAway(header.flags)))),
         }
     }
 
     /// Writes the frame into the provided buffer.
     ///
-    /// # Errors
-    ///
-    /// Returns [`ParserError::LengthOverflow`] if any payload length exceeds `u32`.
-    ///
     /// This helper does not encode data payloads; prefer [`FrameWriter`] for
     /// data frames to ensure headers and chunks are emitted consistently.
-    pub fn write(&self, buffer: &mut impl ChunkBufferWriter) -> Result<(), ParserError> {
+    pub fn write(&self, buffer: &mut impl ChunkBufferWriter) {
         match self {
             Frame::Session(event) => match event {
-                FrameSessionEvent::Ping { flags } => {
+                FrameSessionEvent::Ping(flags) => {
                     Header::new(FrameType::Ping, *flags, StreamID(0), 0).write(buffer);
-                    Ok(())
                 }
-                FrameSessionEvent::GoAway { flags } => {
+                FrameSessionEvent::GoAway(flags) => {
                     Header::new(FrameType::GoAway, *flags, StreamID(0), 0).write(buffer);
-                    Ok(())
                 }
             },
-            Frame::Stream { stream_id, event } => match event {
-                FrameStreamEvent::Data { flags, size } => {
+            Frame::Stream(stream_id, event) => match event {
+                FrameStreamEvent::Data(flags, size) => {
                     Header::new(FrameType::Data, *flags, *stream_id, *size).write(buffer);
-                    Ok(())
                 }
-                FrameStreamEvent::DataChunk { chunk, .. } => {
+                FrameStreamEvent::DataChunk(chunk) => {
                     buffer.write_chunk(chunk);
-                    Ok(())
                 }
-                FrameStreamEvent::WindowUpdate { flags, delta } => {
+                FrameStreamEvent::WindowUpdate(flags, delta) => {
                     Header::new(FrameType::WindowUpdate, *flags, *stream_id, *delta).write(buffer);
-                    Ok(())
                 }
             },
         }

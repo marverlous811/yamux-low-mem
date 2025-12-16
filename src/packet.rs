@@ -20,6 +20,33 @@ pub enum ParserError {
     DataSizeMismatch { expected: u32, got: u32 },
     /// A zero-length chunk would stall progress.
     EmptyChunk,
+    /// Invalid stream ID for pending data.
+    InvalidStreamId,
+    /// Unexpected frame type while waiting for data chunk.
+    UnexpectedFrameType,
+}
+
+/// Errors emitted while serializing frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SerializeError {
+    /// Frame type is not recognized.
+    UnknownType(u8),
+    /// Length or delta field exceeded `u32`.
+    LengthOverflow,
+    /// A data chunk arrived before a data frame header.
+    UnexpectedDataChunk,
+    /// A data frame started before the previous payload completed.
+    PendingData { remaining: u32 },
+    /// The provided stream identifier did not match the expected stream.
+    StreamMismatch { expected: StreamID, got: StreamID },
+    /// A chunk length or `remain` field disagreed with the data frame size.
+    DataSizeMismatch { expected: u32, got: u32 },
+    /// A zero-length chunk would stall progress.
+    EmptyChunk,
+    /// Invalid stream ID for pending data.
+    InvalidStreamId,
+    /// Unexpected frame type while waiting for data chunk.
+    UnexpectedFrameType,
 }
 
 /// Yamux stream identifier.

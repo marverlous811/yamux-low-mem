@@ -10,7 +10,7 @@ use futures::{
 };
 
 use crate::{
-    chunk::ChunkView,
+    chunk::{CHUNK_CAPACITY, ChunkView},
     frame::FrameStreamEvent,
     packet::{Flags, FlagsBuilder},
 };
@@ -21,6 +21,11 @@ pub const INITIAL_WINDOW: u32 = 256 * 1024;
 struct State {
     local: bool,
     remote: bool,
+}
+
+struct Window {
+    send: usize,
+    recv: usize,
 }
 
 impl State {
@@ -38,6 +43,7 @@ pub struct YamuxStreamHead {
     tx: UnboundedSender<ChunkView>,
     rx: Receiver<ChunkView>,
     state: State,
+    window: Window,
     outs: VecDeque<FrameStreamEvent>,
     recv_state: Option<usize>,
 }
@@ -49,6 +55,10 @@ impl YamuxStreamHead {
             tx,
             rx,
             state: State { local: true, remote: false },
+            window: Window {
+                send: INITIAL_WINDOW as usize,
+                recv: INITIAL_WINDOW as usize,
+            },
             outs: VecDeque::from_iter([init_pkt]),
             recv_state: None,
         }
@@ -84,8 +94,9 @@ impl YamuxStreamHead {
                     Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "received data chunk while not receiving data"))
                 }
             }
-            FrameStreamEvent::WindowUpdate(flags, _delta) => {
+            FrameStreamEvent::WindowUpdate(flags, delta) => {
                 self.handle_flag(flags);
+                self.window.send += delta as usize;
 
                 Ok(())
             }
@@ -121,6 +132,13 @@ impl Stream for YamuxStreamHead {
         if this.state.is_closed() {
             //both local and remote are closed => stream is closed
             return Poll::Ready(None);
+        }
+
+        // we need to wait for more data to be available
+        // this hard limit is for simpler implementation. I am avoid complex flow-control window management
+        // other option is try to send as mush as possible with condition this.window.send == 0, but it lead to complex logic
+        if this.window.send < CHUNK_CAPACITY {
+            return Poll::Pending;
         }
 
         while let Poll::Ready(event) = this.rx.poll_next_unpin(cx) {
@@ -194,7 +212,7 @@ impl AsyncWrite for YamuxStream {
             if let Err(e) = event {
                 return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
             }
-            let send_len = buf.len().min(4096);
+            let send_len = buf.len().min(CHUNK_CAPACITY);
             if let Err(e) = this.tx.start_send(buf[..send_len].to_vec().into()) {
                 return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
             }

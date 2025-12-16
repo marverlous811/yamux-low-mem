@@ -8,7 +8,7 @@ use std::{collections::VecDeque, ops::Range, sync::Arc};
 use derive_more::Display;
 
 /// Number of bytes a [`ChunkOwned`] can store.
-const CHUNK_CAPACITY: usize = 4090;
+pub const CHUNK_CAPACITY: usize = 4090;
 
 /// Trait for sequentially consuming bytes from chained chunks without copying.
 pub trait ChunkBufferReader {

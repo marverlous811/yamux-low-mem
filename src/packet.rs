@@ -1,28 +1,40 @@
+use derive_more::Display;
+use thiserror::Error;
+
 use crate::chunk::{ChunkBufferReader, ChunkBufferWriter};
 
 /// Number of bytes in a Yamux header.
 pub const HEADER_LEN: usize = 12;
 
 /// Errors emitted while parsing or encoding frames.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ParserError {
     /// Frame type is not recognized.
+    #[error("unknown frame type: {0}")]
     UnknownType(u8),
     /// Length or delta field exceeded `u32`.
+    #[error("length overflow")]
     LengthOverflow,
     /// A data chunk arrived before a data frame header.
+    #[error("unexpected data chunk")]
     UnexpectedDataChunk,
     /// A data frame started before the previous payload completed.
+    #[error("pending data: {remaining}")]
     PendingData { remaining: u32 },
     /// The provided stream identifier did not match the expected stream.
+    #[error("stream mismatch: expected {expected}, got {got}")]
     StreamMismatch { expected: StreamID, got: StreamID },
     /// A chunk length or `remain` field disagreed with the data frame size.
+    #[error("data size mismatch: expected {expected}, got {got}")]
     DataSizeMismatch { expected: u32, got: u32 },
     /// A zero-length chunk would stall progress.
+    #[error("empty chunk")]
     EmptyChunk,
     /// Invalid stream ID for pending data.
+    #[error("invalid stream ID for pending data")]
     InvalidStreamId,
     /// Unexpected frame type while waiting for data chunk.
+    #[error("unexpected frame type")]
     UnexpectedFrameType,
 }
 
@@ -50,7 +62,7 @@ pub enum SerializeError {
 }
 
 /// Yamux stream identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
 pub struct StreamID(pub u32);
 
 impl StreamID {
@@ -71,7 +83,8 @@ impl StreamID {
 }
 
 /// Yamux control flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
+#[display("Flags(syn: {syn}, ack: {ack}, fin: {fin}, rst: {rst})")]
 pub struct Flags {
     pub syn: bool,
     pub ack: bool,

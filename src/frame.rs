@@ -4,6 +4,8 @@
 //! [`ChunkBufferWriter`] so that callers can operate directly on chunked
 //! buffers without intermediate copies.
 
+use derive_more::Display;
+
 use crate::{
     chunk::{ChunkBufferReader, ChunkBufferSink, ChunkBufferSource, ChunkBufferWriter, ChunkView},
     packet::{Flags, FrameType, Header, ParserError, StreamID},
@@ -134,18 +136,21 @@ impl<W: ChunkBufferWriter + ChunkBufferSource> FrameWriter<W> {
 }
 
 /// Stream-directed events.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Display)]
 pub enum FrameStreamEvent {
     /// Announces an incoming data payload of `size` bytes.
+    #[display("Data({_0}, {_1})")]
     Data(Flags, u32),
     /// Carries a slice of data for the current payload.
+    #[display("DataChunk({_0})")]
     DataChunk(ChunkView),
     /// Updates the flow-control window by `delta`.
+    #[display("WindowUpdate({_0}, {_1})")]
     WindowUpdate(Flags, u32),
 }
 
 /// Session-directed events.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Display)]
 pub enum FrameSessionEvent {
     /// Ping frame (opaque payload not yet modeled).
     Ping(Flags),
@@ -154,11 +159,13 @@ pub enum FrameSessionEvent {
 }
 
 /// Yamux frame variants.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Display)]
 pub enum Frame {
     /// Session-level control event.
+    #[display("Frame::Session({_0})")]
     Session(FrameSessionEvent),
     /// Stream-level event tagged with the destination stream.
+    #[display("Frame::Stream({_0}, {_1})")]
     Stream(StreamID, FrameStreamEvent),
 }
 

@@ -9,7 +9,7 @@ async fn main() {
     loop {
         let (stream, _) = listener.accept().await.unwrap();
         tokio::spawn(async move {
-            let mut session = YamuxSession::server(stream.compat());
+            let mut session = YamuxSession::server(stream.compat(), 8096);
             while let Some(mut stream) = session.next().await {
                 println!("Received new stream");
                 tokio::spawn(async move {

@@ -9,7 +9,7 @@ async fn main() {
     let stream = tokio::net::TcpStream::connect("127.0.0.1:8080").await.unwrap();
     println!("Connected to server");
 
-    let mut session = YamuxSession::client(stream.compat());
+    let mut session = YamuxSession::client(stream.compat(), 8096);
     let mut stream2 = session.open_stream();
 
     tokio::spawn(async move {

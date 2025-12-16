@@ -5,6 +5,8 @@
 
 use std::{collections::VecDeque, ops::Range, sync::Arc};
 
+use derive_more::Display;
+
 /// Number of bytes a [`ChunkOwned`] can store.
 const CHUNK_CAPACITY: usize = 4090;
 
@@ -51,7 +53,8 @@ pub trait ChunkBufferSink {
 }
 
 /// Immutable window into a [`ChunkOwned`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Display)]
+#[display("ChunkView({start}, {end})")]
 pub struct ChunkView {
     data: Arc<ChunkOwned>,
     start: usize,

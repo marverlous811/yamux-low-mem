@@ -24,7 +24,9 @@ struct State {
 }
 
 struct Window {
+    // store how many byte we can send
     send: usize,
+    // store how many byte we already received
     recv: usize,
 }
 
@@ -64,6 +66,17 @@ impl YamuxStreamHead {
         }
     }
 
+    /// Handle tick (send window update if needed)
+    pub fn tick(&mut self) {
+        if self.window.recv > 0 {
+            self.outs.push_back(FrameStreamEvent::WindowUpdate(
+                FlagsBuilder::default().ack(true).build().expect("should build ok"),
+                self.window.recv as u32,
+            ));
+            self.window.recv = 0;
+        }
+    }
+
     /// Handles an incoming frame for this stream.
     pub fn on_input(&mut self, event: FrameStreamEvent) -> std::io::Result<()> {
         match event {
@@ -82,7 +95,10 @@ impl YamuxStreamHead {
                     if *recv_state < chunk_view.len() {
                         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "received data chunk size is larger than expected"));
                     }
+
                     *recv_state -= chunk_view.len();
+                    self.window.recv += chunk_view.len();
+
                     self.tx.unbounded_send(chunk_view).expect("should send ok");
 
                     if *recv_state == 0 {

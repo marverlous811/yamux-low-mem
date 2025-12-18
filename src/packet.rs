@@ -3,9 +3,9 @@
 //! This module contains the byte-level representation of Yamux frames as described in `SPEC.md`.
 //! Higher-level parsing and chunked streaming are implemented in [`crate::frame`].
 
-use derive_builder::Builder;
 use derive_more::Display;
 use thiserror::Error;
+use typesafe_builder::*;
 
 use crate::chunk::{ChunkBufferReader, ChunkBufferWriter};
 
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn flags_build_test() {
-        let flags = FlagsBuilder::default().syn(true).ack(true).fin(true).rst(true).build().unwrap();
+        let flags = FlagsBuilder::new().with_syn(true).with_ack(true).with_fin(true).with_rst(true).build();
         assert_eq!(flags.bits() & 0xF, 0xF);
 
         for bits in 0u16..16u16 {
@@ -269,38 +269,32 @@ mod tests {
 
     #[test]
     fn frame_type_vs_u8_test() {
-        assert_eq!(FrameType::from_u8(0).unwrap(), FrameType::Data);
-        assert_eq!(FrameType::from_u8(1).unwrap(), FrameType::WindowUpdate);
-        assert_eq!(FrameType::from_u8(2).unwrap(), FrameType::Ping);
-        assert_eq!(FrameType::from_u8(3).unwrap(), FrameType::GoAway);
+        assert_eq!(FrameType::from_u8(0), Ok(FrameType::Data));
+        assert_eq!(FrameType::from_u8(1), Ok(FrameType::WindowUpdate));
+        assert_eq!(FrameType::from_u8(2), Ok(FrameType::Ping));
+        assert_eq!(FrameType::from_u8(3), Ok(FrameType::GoAway));
 
-        assert_eq!(FrameType::from_u8(250).unwrap_err(), ParserError::UnknownType(250));
+        assert_eq!(FrameType::from_u8(250), Err(ParserError::UnknownType(250)));
     }
 
     #[test]
     fn header_build_parse_test() {
-        let header = Header::new(
-            FrameType::Data,
-            FlagsBuilder::default().syn(true).build().unwrap(),
-            StreamID(3),
-            42,
-        );
+        let header = Header::new(FrameType::Data, FlagsBuilder::new().with_syn(true).build(), StreamID(3), 42);
         assert_eq!(header.version, 0);
 
         let mut out = ChunkOwned::default();
         header.write(&mut out);
         let mut view: crate::chunk::ChunkView = out.into();
-        let parsed = Header::read(&mut view).unwrap().unwrap();
-        assert_eq!(parsed, header);
+        assert_eq!(Header::read(&mut view), Ok(Some(header)));
         assert_eq!(view.len(), 0);
 
         let mut short: crate::chunk::ChunkView = vec![0u8; HEADER_LEN - 1].into();
-        assert!(Header::read(&mut short).unwrap().is_none());
+        assert_eq!(Header::read(&mut short), Ok(None));
 
         let mut bad_type_bytes = vec![0u8; HEADER_LEN];
         bad_type_bytes[0] = 0;
         bad_type_bytes[1] = 99;
         let mut bad: crate::chunk::ChunkView = bad_type_bytes.into();
-        assert_eq!(Header::read(&mut bad).unwrap_err(), ParserError::UnknownType(99));
+        assert_eq!(Header::read(&mut bad), Err(ParserError::UnknownType(99)));
     }
 }

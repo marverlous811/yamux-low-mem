@@ -71,7 +71,7 @@ pub struct YamuxStreamHead {
 impl YamuxStreamHead {
     /// Creates a new outbound stream head (initiates with `SYN`).
     fn open(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
-        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::default().syn(true).build().expect("should build ok"), INITIAL_WINDOW);
+        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::new().with_syn(true).build(), INITIAL_WINDOW);
         Self {
             tx,
             rx,
@@ -87,7 +87,7 @@ impl YamuxStreamHead {
 
     /// Creates a new inbound stream head (acknowledges with `ACK`).
     fn accept(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
-        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::default().ack(true).build().expect("should build ok"), INITIAL_WINDOW);
+        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::new().with_ack(true).build(), INITIAL_WINDOW);
         Self {
             tx,
             rx,
@@ -173,10 +173,7 @@ impl YamuxStreamHead {
         self.window.recv += received;
         // auto send WindowUpdate when we received INITIAL_WINDOW
         if self.window.recv + DEFAULT_CHUNK_CAPACITY >= INITIAL_WINDOW as usize / 2 {
-            self.outs.push_back(FrameStreamEvent::WindowUpdate(
-                FlagsBuilder::default().ack(true).build().expect("should build ok"),
-                self.window.recv as u32,
-            ));
+            self.outs.push_back(FrameStreamEvent::WindowUpdate(FlagsBuilder::new().with_ack(true).build(), self.window.recv as u32));
             self.window.recv = 0;
         }
     }

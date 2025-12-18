@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 derive_more = { version = "2.1", features = ["display"] }
-derive_builder = "0.20"
+typesafe_builder = "1.6"
 futures = "0.3"
 thiserror = "2.0"
 log = "0.4"

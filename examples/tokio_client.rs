@@ -11,7 +11,7 @@ use yamux_low_mem::session::YamuxSession;
 async fn main() {
     //TODO: implement client here
 
-    let stream = tokio::net::TcpStream::connect("127.0.0.1:8080").await.unwrap();
+    let stream = tokio::net::TcpStream::connect("127.0.0.1:8080").await.expect("Failed to connect to server");
     println!("Connected to server");
 
     let mut session = YamuxSession::client(stream.compat(), 8096);
@@ -19,10 +19,10 @@ async fn main() {
 
     tokio::spawn(async move {
         let send_data = b"Hello from client!";
-        stream2.write_all(&send_data[..]).await.unwrap();
+        stream2.write_all(&send_data[..]).await.expect("Failed to write to stream");
 
         let mut recv_data = [0u8; 1024];
-        let len = stream2.read(&mut recv_data).await.unwrap();
+        let len = stream2.read(&mut recv_data).await.expect("Failed to read from stream");
 
         println!("Received {} bytes: {:?}", len, &recv_data[..len]);
         assert_eq!(len, send_data.len());

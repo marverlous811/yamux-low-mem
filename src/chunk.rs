@@ -458,11 +458,10 @@ mod tests {
     #[test]
     fn chunk_view_subview() {
         let view: ChunkView = vec![10u8, 11, 12, 13].into();
-        let sub = view.view(1..3).unwrap();
-        assert_eq!(&*sub, &[11, 12]);
+        let sub = view.view(1..3);
+        assert_eq!(sub.as_deref(), Ok([11u8, 12].as_slice()));
 
-        let err = view.view(0..99).unwrap_err();
-        assert!(matches!(err, ChunkError::Overflow { .. }));
+        assert_eq!(view.view(0..99), Err(ChunkError::Overflow { attempted: 99 }));
     }
 
     #[test]

@@ -270,17 +270,13 @@ mod tests {
 
     #[test]
     fn write_frame_then_parse() {
-        let frame = Frame::Session(FrameSessionEvent::Ping(
-            FlagsBuilder::default().syn(true).build().unwrap(),
-            123,
-        ));
+        let frame = Frame::Session(FrameSessionEvent::Ping(FlagsBuilder::new().with_syn(true).build(), 123));
 
         let mut buf = ChainedChunkBufferWriter::new();
         frame.write(&mut buf);
 
         let mut view: crate::chunk::ChunkView = buf.pop_front().expect("encoded header").into();
-        let parsed = Frame::read(&mut view).unwrap().unwrap();
-        assert_eq!(parsed, frame);
+        assert_eq!(Frame::read(&mut view), Ok(Some(frame)));
     }
 
     #[test]
@@ -293,13 +289,9 @@ mod tests {
             0u8, 0u8, 0u8, 99u8,
         ];
         let mut view: crate::chunk::ChunkView = bytes.to_vec().into();
-        let frame = Frame::read(&mut view).unwrap().unwrap();
         assert_eq!(
-            frame,
-            Frame::Stream(
-                StreamID(7),
-                FrameStreamEvent::WindowUpdate(FlagsBuilder::default().fin(true).build().unwrap(), 99)
-            )
+            Frame::read(&mut view),
+            Ok(Some(Frame::Stream(StreamID(7), FrameStreamEvent::WindowUpdate(FlagsBuilder::new().with_fin(true).build(), 99))))
         );
         assert_eq!(view.len(), 0);
     }
@@ -307,20 +299,14 @@ mod tests {
     #[test]
     fn pipe_writer_to_reader_frames() {
         let stream_id = StreamID(1);
-        let data: Vec<u8> = (0..(crate::chunk::DEFAULT_CHUNK_CAPACITY * 2 + 17))
-            .map(|i| (i % 251) as u8)
-            .collect();
+        let data: Vec<u8> = (0..(crate::chunk::DEFAULT_CHUNK_CAPACITY * 2 + 17)).map(|i| (i % 251) as u8).collect();
 
         let mut writer = FrameWriter::new(ChainedChunkBufferWriter::new());
-        writer
-            .write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), data.len() as u32)))
-            .unwrap();
+        writer.write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), data.len() as u32))).expect("should write");
         for chunk in data.chunks(777) {
-            writer
-                .write(Frame::Stream(stream_id, FrameStreamEvent::DataChunk(chunk.to_vec().into())))
-                .unwrap();
+            writer.write(Frame::Stream(stream_id, FrameStreamEvent::DataChunk(chunk.to_vec().into()))).expect("should write");
         }
-        writer.write(Frame::Session(FrameSessionEvent::GoAway(0))).unwrap();
+        writer.write(Frame::Session(FrameSessionEvent::GoAway(0))).expect("should write");
 
         let buffer = writer.take();
         let mut reader = FrameReader::new(ChainedChunkBufferReader::from(buffer));
@@ -330,7 +316,7 @@ mod tests {
         let mut got_goaway = false;
 
         loop {
-            match reader.next_frame().unwrap() {
+            match reader.next_frame().expect("should not fail") {
                 None => break,
                 Some(Frame::Stream(id, FrameStreamEvent::Data(_, size))) => {
                     assert_eq!(id, stream_id);
@@ -358,50 +344,37 @@ mod tests {
         let stream_id = StreamID(9);
         let data = b"hello".to_vec();
         let mut writer = FrameWriter::new(ChainedChunkBufferWriter::new());
-        writer
-            .write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), data.len() as u32)))
-            .unwrap();
-        writer
-            .write(Frame::Stream(stream_id, FrameStreamEvent::DataChunk(data.clone().into())))
-            .unwrap();
+        writer.write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), data.len() as u32))).expect("should write");
+        writer.write(Frame::Stream(stream_id, FrameStreamEvent::DataChunk(data.clone().into()))).expect("should write");
 
         let mut reader = FrameReader::new(ChainedChunkBufferReader::from(writer.take()));
-        assert!(matches!(
-            reader.next_frame().unwrap(),
-            Some(Frame::Stream(StreamID(9), FrameStreamEvent::Data(_, 5)))
-        ));
-        let chunk = match reader.next_frame().unwrap().unwrap() {
+        assert!(matches!(reader.next_frame().expect("should not fail"), Some(Frame::Stream(StreamID(9), FrameStreamEvent::Data(_, 5)))));
+        let chunk = match reader.next_frame().expect("should not fail").expect("should not fail") {
             Frame::Stream(StreamID(9), FrameStreamEvent::DataChunk(chunk)) => chunk,
             other => panic!("unexpected frame: {other:?}"),
         };
         assert_eq!(&*chunk, &data);
-        assert!(reader.next_frame().unwrap().is_none());
+        assert_eq!(reader.next_frame().expect("should not fail"), None);
     }
 
     #[test]
     fn large_data_frame() {
         let stream_id = StreamID(11);
-        let data: Vec<u8> = (0..(crate::chunk::DEFAULT_CHUNK_CAPACITY * 3 + 1))
-            .map(|i| (i % 251) as u8)
-            .collect();
+        let data: Vec<u8> = (0..(crate::chunk::DEFAULT_CHUNK_CAPACITY * 3 + 1)).map(|i| (i % 251) as u8).collect();
         let mut writer = FrameWriter::new(ChainedChunkBufferWriter::new());
-        writer
-            .write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), data.len() as u32)))
-            .unwrap();
+        writer.write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), data.len() as u32))).expect("should write");
         for chunk in data.chunks(crate::chunk::DEFAULT_CHUNK_CAPACITY) {
-            writer
-                .write(Frame::Stream(stream_id, FrameStreamEvent::DataChunk(chunk.to_vec().into())))
-                .unwrap();
+            writer.write(Frame::Stream(stream_id, FrameStreamEvent::DataChunk(chunk.to_vec().into()))).expect("should write");
         }
 
         let mut reader = FrameReader::new(ChainedChunkBufferReader::from(writer.take()));
-        let header = reader.next_frame().unwrap().unwrap();
-        assert!(matches!(header, Frame::Stream(StreamID(11), FrameStreamEvent::Data(_, _))));
+        let header = reader.next_frame().expect("should not fail");
+        assert_eq!(header, Some(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), data.len() as u32))));
 
         let mut got = Vec::new();
         let mut chunks = 0usize;
         loop {
-            match reader.next_frame().unwrap() {
+            match reader.next_frame().expect("should not fail") {
                 None => break,
                 Some(Frame::Stream(StreamID(11), FrameStreamEvent::DataChunk(chunk))) => {
                     chunks += 1;
@@ -420,36 +393,21 @@ mod tests {
         let other_stream = StreamID(3);
         let mut writer = FrameWriter::new(ChainedChunkBufferWriter::new());
 
-        writer
-            .write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), 3)))
-            .unwrap();
+        writer.write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), 3))).expect("should write");
 
-        let err = writer
-            .write(Frame::Session(FrameSessionEvent::Ping(
-                FlagsBuilder::default().syn(true).build().unwrap(),
-                0,
-            )))
-            .unwrap_err();
+        let err = writer.write(Frame::Session(FrameSessionEvent::Ping(FlagsBuilder::new().with_syn(true).build(), 0))).unwrap_err();
         assert_eq!(err, FrameWriterError::UnexpectedFrameType);
 
         // Reset writer state.
         let mut writer = FrameWriter::new(ChainedChunkBufferWriter::new());
-        writer
-            .write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), 3)))
-            .unwrap();
-        let err = writer
-            .write(Frame::Stream(other_stream, FrameStreamEvent::DataChunk(vec![1, 2, 3].into())))
-            .unwrap_err();
+        writer.write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), 3))).expect("should write");
+        let err = writer.write(Frame::Stream(other_stream, FrameStreamEvent::DataChunk(vec![1, 2, 3].into()))).unwrap_err();
         assert_eq!(err, FrameWriterError::InvalidStreamId);
 
         // Oversized chunk should error.
         let mut writer = FrameWriter::new(ChainedChunkBufferWriter::new());
-        writer
-            .write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), 2)))
-            .unwrap();
-        let err = writer
-            .write(Frame::Stream(stream_id, FrameStreamEvent::DataChunk(vec![1, 2, 3].into())))
-            .unwrap_err();
+        writer.write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), 2))).expect("should write");
+        let err = writer.write(Frame::Stream(stream_id, FrameStreamEvent::DataChunk(vec![1, 2, 3].into()))).unwrap_err();
         assert_eq!(err, FrameWriterError::ChunkTooLarge);
     }
 }

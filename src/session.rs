@@ -112,8 +112,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
                     Frame::Session(event) => match event {
                         FrameSessionEvent::Ping(flags, code) => {
                             if flags.syn {
-                                this.out_queue
-                                    .push_back(Frame::Session(FrameSessionEvent::Ping(FlagsBuilder::default().ack(true).build().expect("should build flags"), code)));
+                                this.out_queue.push_back(Frame::Session(FrameSessionEvent::Ping(FlagsBuilder::new().with_ack(true).build(), code)));
                             } else if flags.ack {
                                 log::info!("[YamuxSession] got pong");
                             }

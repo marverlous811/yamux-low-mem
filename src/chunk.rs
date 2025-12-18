@@ -242,6 +242,7 @@ impl ChunkOwned {
 
     /// Marks `len` bytes as consumed from the front of this chunk.
     pub fn consume_front(&mut self, len: usize) {
+        assert!(self.consumed + len <= self.len);
         self.consumed += len;
     }
 }
@@ -307,10 +308,12 @@ impl ChunkBufferSource for ChainedChunkBufferWriter {
 
     fn consume_front(&mut self, len: usize) {
         // Callers ensure `len` does not exceed `front_slice().len()`.
-        self.queue.front_mut().map(|c| {
-            c.consume_front(len);
-            self.filled_len -= len;
-        });
+        let front = self.queue.front_mut().expect("should have front");
+        front.consume_front(len);
+        self.filled_len -= len;
+        if front.filled_len() == 0 {
+            self.queue.pop_front();
+        }
     }
 }
 
@@ -503,9 +506,7 @@ mod tests {
     #[test]
     fn chain_chunk_buffer_writer_write_datas() {
         let mut writer = ChainedChunkBufferWriter::new();
-        let data: Vec<u8> = (0..(DEFAULT_CHUNK_CAPACITY * 2 + 13))
-            .map(|i| (i % 251) as u8)
-            .collect();
+        let data: Vec<u8> = (0..(DEFAULT_CHUNK_CAPACITY * 2 + 13)).map(|i| (i % 251) as u8).collect();
 
         writer.write_slice(&data);
         assert_eq!(writer.filled_len(), data.len());

@@ -1,13 +1,22 @@
-use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::{AsyncRead, AsyncWrite, Sink, Stream};
+use thiserror::Error;
 
 use crate::chunk::{ChainedChunkBufferReader, ChainedChunkBufferWriter, ChunkBufferSource, ChunkBufferWriter};
 use crate::frame::{Frame, FrameReader, FrameWriter};
+use crate::packet::ParserError;
 
 // === Transport ===
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum YamuxTransportError {
+    #[error("io error {0}")]
+    Io(String),
+    #[error("parser error {0}")]
+    ParserError(#[from] ParserError),
+}
 
 /// Adapts an `AsyncRead`/`AsyncWrite` stream into Yamux frames using chunked buffers.
 ///
@@ -37,10 +46,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxTransport<T> {
     /// This method drains the internal [`ChainedChunkBufferWriter`] by repeatedly polling
     /// the wrapped I/O object. It returns [`Poll::Pending`] as soon as the underlying
     /// stream would block.
-    fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+    fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), YamuxTransportError>> {
         // pop front as long as we can write
         while let Some(front) = self.writer.buffer_mut().front_slice() {
-            match Pin::new(&mut self.stream).poll_write(cx, front)? {
+            match Pin::new(&mut self.stream).poll_write(cx, front).map_err(|e| YamuxTransportError::Io(e.to_string()))? {
                 Poll::Ready(written) => {
                     self.writer.buffer_mut().consume_front(written);
                 }
@@ -52,7 +61,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxTransport<T> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame> for YamuxTransport<T> {
-    type Error = io::Error;
+    type Error = YamuxTransportError;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
@@ -86,14 +95,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame> for YamuxTransport<T> {
         let this = self.get_mut();
 
         match this.poll_write(cx)? {
-            Poll::Ready(_) => Pin::new(&mut this.stream).poll_close(cx),
+            Poll::Ready(_) => Pin::new(&mut this.stream).poll_close(cx).map_err(|e| YamuxTransportError::Io(e.to_string())),
             Poll::Pending => Poll::Pending,
         }
     }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxTransport<T> {
-    type Item = Result<Frame, io::Error>;
+    type Item = Result<Frame, YamuxTransportError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -106,10 +115,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxTransport<T> {
                     match this.reader.next_frame() {
                         Ok(Some(frame)) => return Poll::Ready(Some(Ok(frame))),
                         Ok(None) => continue,
-                        Err(e) => return Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::BrokenPipe, e)))),
+                        Err(e) => return Poll::Ready(Some(Err(YamuxTransportError::ParserError(e)))),
                     }
                 }
-                Err(e) => return Poll::Ready(Some(Err(e))),
+                Err(e) => return Poll::Ready(Some(Err(YamuxTransportError::Io(e.to_string())))),
             }
         }
         Poll::Pending
@@ -118,8 +127,36 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxTransport<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::task::{Context, Poll};
+
+    use futures::{SinkExt, StreamExt, task::noop_waker};
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+
+    use crate::{
+        frame::{Frame, FrameSessionEvent},
+        packet::Flags,
+        transport::YamuxTransport,
+    };
+
     #[test]
     fn pipe_2_streams() {
-        //TODO
+        let (left, right) = tokio::io::duplex(64 * 1024);
+        let mut left = YamuxTransport::new(left.compat(), 64 * 1024);
+        let mut right = YamuxTransport::new(right.compat(), 64 * 1024);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ping_frame = Frame::Session(FrameSessionEvent::Ping(Flags::empty(), 12345));
+        assert_eq!(left.poll_ready_unpin(&mut cx), Poll::Ready(Ok(())));
+
+        // write to left
+        assert_eq!(left.start_send_unpin(ping_frame.clone()), Ok(()));
+
+        // flush left
+        assert_eq!(left.poll_flush_unpin(&mut cx), Poll::Ready(Ok(())));
+
+        // read from right
+        assert_eq!(right.poll_next_unpin(&mut cx), Poll::Ready(Some(Ok(ping_frame))));
     }
 }

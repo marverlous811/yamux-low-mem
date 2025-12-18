@@ -239,23 +239,68 @@ impl Header {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::chunk::ChunkOwned;
+
     #[test]
     fn stream_build_test() {
-        //TODO
+        assert!(StreamID(0).is_session());
+        assert!(!StreamID(0).is_client());
+        assert!(StreamID(0).is_server());
+
+        assert!(StreamID(1).is_client());
+        assert!(!StreamID(1).is_server());
+        assert!(!StreamID(1).is_session());
+
+        assert!(StreamID(2).is_server());
+        assert!(!StreamID(2).is_client());
     }
 
     #[test]
     fn flags_build_test() {
-        //TODO
+        let flags = FlagsBuilder::default().syn(true).ack(true).fin(true).rst(true).build().unwrap();
+        assert_eq!(flags.bits() & 0xF, 0xF);
+
+        for bits in 0u16..16u16 {
+            let decoded = Flags::from_bits(bits);
+            assert_eq!(decoded.bits(), bits);
+        }
     }
 
     #[test]
     fn frame_type_vs_u8_test() {
-        //TODO
+        assert_eq!(FrameType::from_u8(0).unwrap(), FrameType::Data);
+        assert_eq!(FrameType::from_u8(1).unwrap(), FrameType::WindowUpdate);
+        assert_eq!(FrameType::from_u8(2).unwrap(), FrameType::Ping);
+        assert_eq!(FrameType::from_u8(3).unwrap(), FrameType::GoAway);
+
+        assert_eq!(FrameType::from_u8(250).unwrap_err(), ParserError::UnknownType(250));
     }
 
     #[test]
     fn header_build_parse_test() {
-        //TODO
+        let header = Header::new(
+            FrameType::Data,
+            FlagsBuilder::default().syn(true).build().unwrap(),
+            StreamID(3),
+            42,
+        );
+        assert_eq!(header.version, 0);
+
+        let mut out = ChunkOwned::default();
+        header.write(&mut out);
+        let mut view: crate::chunk::ChunkView = out.into();
+        let parsed = Header::read(&mut view).unwrap().unwrap();
+        assert_eq!(parsed, header);
+        assert_eq!(view.len(), 0);
+
+        let mut short: crate::chunk::ChunkView = vec![0u8; HEADER_LEN - 1].into();
+        assert!(Header::read(&mut short).unwrap().is_none());
+
+        let mut bad_type_bytes = vec![0u8; HEADER_LEN];
+        bad_type_bytes[0] = 0;
+        bad_type_bytes[1] = 99;
+        let mut bad: crate::chunk::ChunkView = bad_type_bytes.into();
+        assert_eq!(Header::read(&mut bad).unwrap_err(), ParserError::UnknownType(99));
     }
 }

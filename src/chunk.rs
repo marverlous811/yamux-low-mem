@@ -337,6 +337,7 @@ impl ChunkBufferWriter for ChainedChunkBufferWriter {
             chunk.write_u8(byte);
             self.queue.push_back(chunk);
         }
+        self.filled_len += 1;
     }
 
     fn write_slice(&mut self, data: &[u8]) {
@@ -354,12 +355,14 @@ impl ChunkBufferWriter for ChainedChunkBufferWriter {
                 let write_len = last.available_len().min(data.len() - offset);
                 last.write_slice(&data[offset..offset + write_len]);
                 offset += write_len;
+                self.filled_len += write_len;
             } else {
                 let mut chunk = ChunkOwned::default();
                 let write_len = chunk.available_len().min(data.len() - offset);
                 chunk.write_slice(&data[offset..offset + write_len]);
                 offset += write_len;
                 self.queue.push_back(chunk);
+                self.filled_len += write_len;
             }
         }
     }
@@ -435,43 +438,101 @@ impl ChunkBufferReader for ChainedChunkBufferReader {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn chunk_view_build_from_vec() {
-        //TODO
+        let mut view: ChunkView = vec![1u8, 2, 3].into();
+        assert_eq!(view.len(), 3);
+        assert_eq!(&*view, &[1, 2, 3]);
+
+        assert_eq!(view.next_u8(), Some(1));
+        assert_eq!(view.next_u8(), Some(2));
+        assert_eq!(view.next_u8(), Some(3));
+        assert_eq!(view.next_u8(), None);
     }
 
     #[test]
     fn chunk_view_subview() {
-        //TODO
+        let view: ChunkView = vec![10u8, 11, 12, 13].into();
+        let sub = view.view(1..3).unwrap();
+        assert_eq!(&*sub, &[11, 12]);
+
+        let err = view.view(0..99).unwrap_err();
+        assert!(matches!(err, ChunkError::Overflow { .. }));
     }
 
     #[test]
     fn chunk_owned_build_from_vec() {
-        //TODO
+        let owned: ChunkOwned = vec![1u8, 2, 3, 4].into();
+        assert_eq!(owned.filled_len(), 4);
+        assert_eq!(owned.filled_slice(), &[1, 2, 3, 4]);
     }
 
     #[test]
     fn chunk_owned_push() {
-        //TODO
+        let mut owned = ChunkOwned::default();
+        assert_eq!(owned.filled_len(), 0);
+        assert_eq!(owned.available_len(), DEFAULT_CHUNK_CAPACITY);
+
+        owned.write_u8(7);
+        owned.write_u8(8);
+        assert_eq!(owned.filled_len(), 2);
+        assert_eq!(owned.filled_slice(), &[7, 8]);
+        assert_eq!(owned.available_len(), DEFAULT_CHUNK_CAPACITY - 2);
     }
 
     #[test]
     fn chunk_owned_to_view() {
-        //TODO
+        let mut owned = ChunkOwned::default();
+        owned.write_slice(&[1, 2, 3]);
+        let view: ChunkView = owned.into();
+        assert_eq!(view.len(), 3);
+        assert_eq!(&*view, &[1, 2, 3]);
     }
 
     #[test]
     fn chunk_owned_extend_slice() {
-        //TODO
+        let mut owned = ChunkOwned::default();
+        owned.write_slice(&[1, 2]);
+        owned.write_slice(&[3, 4, 5]);
+        assert_eq!(owned.filled_len(), 5);
+        assert_eq!(owned.filled_slice(), &[1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn chain_chunk_buffer_writer_write_datas() {
-        //TODO
+        let mut writer = ChainedChunkBufferWriter::new();
+        let data: Vec<u8> = (0..(DEFAULT_CHUNK_CAPACITY * 2 + 13))
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        writer.write_slice(&data);
+        assert_eq!(writer.filled_len(), data.len());
+        assert!(writer.filled_len() > DEFAULT_CHUNK_CAPACITY);
+
+        let mut reader: ChainedChunkBufferReader = writer.into();
+        let mut roundtrip = Vec::new();
+        while let Some(chunk) = reader.next_chunk(usize::MAX) {
+            roundtrip.extend_from_slice(&chunk);
+        }
+        assert_eq!(roundtrip, data);
     }
 
     #[test]
     fn chain_chunk_buffer_writer_pop() {
-        //TODO
+        let mut writer = ChainedChunkBufferWriter::new();
+        let data = vec![9u8; DEFAULT_CHUNK_CAPACITY + 5];
+        writer.write_slice(&data);
+
+        let first = writer.pop_front().expect("expected first chunk");
+        assert_eq!(first.len(), DEFAULT_CHUNK_CAPACITY);
+        assert_eq!(&*first, &data[..DEFAULT_CHUNK_CAPACITY]);
+        assert_eq!(writer.filled_len(), 5);
+
+        let second = writer.pop_front().expect("expected second chunk");
+        assert_eq!(second.len(), 5);
+        assert_eq!(&*second, &data[DEFAULT_CHUNK_CAPACITY..]);
+        assert_eq!(writer.filled_len(), 0);
     }
 }

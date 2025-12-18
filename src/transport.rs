@@ -133,7 +133,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxTransport<T> {
                         Err(e) => return Poll::Ready(Some(Err(YamuxTransportError::ParserError(e)))),
                     }
                 }
-                Err(e) => return Poll::Ready(Some(Err(YamuxTransportError::Io(e.to_string())))),
+                Err(e) => {
+                    log::error!("[YamuxTransport] stream error {e}");
+                    return Poll::Ready(Some(Err(YamuxTransportError::Io(e.to_string()))));
+                }
             }
         }
         Poll::Pending

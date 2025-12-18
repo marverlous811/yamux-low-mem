@@ -72,10 +72,10 @@ impl<R: ChunkBufferReader + ChunkBufferSink> FrameReader<R> {
                     // Start tracking this data frame for chunked delivery
                     self.pending = Some(PendingPayload { stream_id, remain: size as usize });
                 }
-                return Ok(Some(frame));
+                Ok(Some(frame))
             }
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 }
@@ -251,7 +251,7 @@ impl Frame {
                 }
                 FrameStreamEvent::DataChunk(chunk) => {
                     if !chunk.is_empty() {
-                        buffer.write_slice(&chunk);
+                        buffer.write_slice(chunk);
                     }
                 }
                 FrameStreamEvent::WindowUpdate(flags, delta) => {

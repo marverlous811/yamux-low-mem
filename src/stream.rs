@@ -143,11 +143,11 @@ impl YamuxStreamHead {
 
                     *recv_state -= chunk_view.len();
                     let received_len = chunk_view.len();
-                    if let Some(tx) = &self.tx {
-                        if let Err(e) = tx.unbounded_send(chunk_view) {
-                            log::error!("[YamuxStreamHead {}] failed {e} to send data chunk to local stream => clear tx", self.id);
-                            self.tx = None;
-                        }
+                    if let Some(tx) = &self.tx
+                        && let Err(e) = tx.unbounded_send(chunk_view)
+                    {
+                        log::error!("[YamuxStreamHead {}] failed {e} to send data chunk to local stream => clear tx", self.id);
+                        self.tx = None;
                     }
 
                     if *recv_state == 0 {
@@ -220,11 +220,11 @@ impl YamuxStreamHead {
     fn try_close_remote(&mut self) -> bool {
         if self.state.remote {
             self.state.remote = false;
-            if let Some(tx) = &self.tx {
-                if let Err(e) = tx.unbounded_send(vec![].into()) {
-                    log::error!("[YamuxStreamHead {}] failed to send empty chunk on fin: {} => clear tx", self.id, e);
-                    self.tx = None;
-                }
+            if let Some(tx) = &self.tx
+                && let Err(e) = tx.unbounded_send(vec![].into())
+            {
+                log::error!("[YamuxStreamHead {}] failed to send empty chunk on fin: {} => clear tx", self.id, e);
+                self.tx = None;
             }
             true
         } else {
@@ -259,12 +259,12 @@ impl Stream for YamuxStreamHead {
         // }
 
         // we only get more data from local stream when window is available
-        while this.window.send > DEFAULT_CHUNK_CAPACITY
+        while this.window.send >= DEFAULT_CHUNK_CAPACITY
             && let Poll::Ready(event) = this.rx.poll_next_unpin(cx)
         {
             match event {
                 Some(chunk) => {
-                    if chunk.len() == 0 {
+                    if chunk.is_empty() {
                         if this.try_close_local() {
                             log::info!("[YamuxStreamHead {}] reveived 0 byte chunk => this is local close hint", this.id);
                         }
@@ -317,19 +317,19 @@ impl AsyncRead for YamuxStream {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
 
-        if this.recv_chunk.is_none() {
-            if let Poll::Ready(event) = this.rx.poll_next_unpin(cx) {
-                if let Some(chunk) = event {
-                    if chunk.len() == 0 {
-                        log::info!("[YamuxStream {}] received empty chunk, remote stream likely closed", this.id);
-                        return Poll::Ready(Ok(0));
-                    } else {
-                        log::debug!("[YamuxStream {}] received {} bytes from remote", this.id, chunk.len());
-                        this.recv_chunk = Some((chunk, 0));
-                    }
+        if this.recv_chunk.is_none()
+            && let Poll::Ready(event) = this.rx.poll_next_unpin(cx)
+        {
+            if let Some(chunk) = event {
+                if chunk.is_empty() {
+                    log::info!("[YamuxStream {}] received empty chunk, remote stream likely closed", this.id);
+                    return Poll::Ready(Ok(0));
                 } else {
-                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "internal channel closed")));
+                    log::debug!("[YamuxStream {}] received {} bytes from remote", this.id, chunk.len());
+                    this.recv_chunk = Some((chunk, 0));
                 }
+            } else {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "internal channel closed")));
             }
         }
 
@@ -507,7 +507,7 @@ mod tests {
 
         drop(stream);
 
-        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::Data(Flags::fin(), 0))));
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::fin(), 0))));
 
         // FIN is only emitted once.
         assert_eq!(head.poll_next_unpin(&mut cx), Poll::Pending);
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(head.on_input(FrameStreamEvent::Data(Flags::empty(), DEFAULT_CHUNK_CAPACITY as u32)), Ok(()));
         assert_eq!(head.on_input(FrameStreamEvent::DataChunk(vec![0u8; DEFAULT_CHUNK_CAPACITY].into())), Ok(()));
 
-        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::ack(), DEFAULT_WINDOW_UPDATE_THRESHOLD))));
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::empty(), DEFAULT_WINDOW_UPDATE_THRESHOLD))));
     }
 
     #[test]

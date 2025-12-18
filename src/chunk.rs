@@ -180,7 +180,7 @@ impl ChunkBufferReader for ChunkView {
     }
 
     fn next_u8(&mut self) -> Option<u8> {
-        if self.len() == 0 {
+        if self.is_empty() {
             return None;
         }
         let value = self.data.data[self.start];
@@ -189,7 +189,7 @@ impl ChunkBufferReader for ChunkView {
     }
 
     fn next_chunk(&mut self, max_len: usize) -> Option<ChunkView> {
-        if self.len() == 0 {
+        if self.is_empty() {
             return None;
         }
 

@@ -72,9 +72,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame> for YamuxTransport<T> {
             Poll::Pending => {
                 // if we have buffer more than max_writer_buffer, we need to wait
                 if this.writer.buffer_mut().filled_len() >= this.max_writer_buffer {
-                    return Poll::Pending;
+                    Poll::Pending
                 } else {
-                    return Poll::Ready(Ok(()));
+                    Poll::Ready(Ok(()))
                 }
             }
         }

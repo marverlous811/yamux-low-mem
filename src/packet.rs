@@ -1,11 +1,20 @@
+//! Yamux wire-level packet definitions.
+//!
+//! This module contains the byte-level representation of Yamux frames as described in `SPEC.md`.
+//! Higher-level parsing and chunked streaming are implemented in [`crate::frame`].
+
 use derive_builder::Builder;
 use derive_more::Display;
 use thiserror::Error;
 
 use crate::chunk::{ChunkBufferReader, ChunkBufferWriter};
 
+// === Constants ===
+
 /// Number of bytes in a Yamux header.
 pub const HEADER_LEN: usize = 12;
+
+// === Errors ===
 
 /// Errors emitted while parsing or encoding frames.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -40,6 +49,9 @@ pub enum ParserError {
 }
 
 /// Errors emitted while serializing frames.
+///
+/// Note: this type is currently unused; callers generally use [`ParserError`]
+/// because parsing and encoding share the same invariants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SerializeError {
     /// Frame type is not recognized.
@@ -62,6 +74,8 @@ pub enum SerializeError {
     UnexpectedFrameType,
 }
 
+// === Identifiers ===
+
 /// Yamux stream identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
 pub struct StreamID(pub u32);
@@ -83,17 +97,23 @@ impl StreamID {
     }
 }
 
+// === Flags ===
+
 /// Yamux control flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Builder)]
 #[display("Flags(syn: {syn}, ack: {ack}, fin: {fin}, rst: {rst})")]
 pub struct Flags {
     #[builder(default = "false")]
+    /// SYN (open stream).
     pub syn: bool,
     #[builder(default = "false")]
+    /// ACK (accept stream).
     pub ack: bool,
     #[builder(default = "false")]
+    /// FIN (half-close).
     pub fin: bool,
     #[builder(default = "false")]
+    /// RST (hard reset).
     pub rst: bool,
 }
 
@@ -124,6 +144,8 @@ impl Flags {
     }
 }
 
+// === Frame metadata ===
+
 /// Yamux frame type discriminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
@@ -134,6 +156,11 @@ pub enum FrameType {
 }
 
 impl FrameType {
+    /// Parses the on-the-wire discriminant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParserError::UnknownType`] if `value` is not a known frame type.
     fn from_u8(value: u8) -> Result<Self, ParserError> {
         match value {
             0 => Ok(FrameType::Data),
@@ -144,6 +171,7 @@ impl FrameType {
         }
     }
 
+    /// Returns the on-the-wire discriminant.
     fn as_u8(self) -> u8 {
         self as u8
     }
@@ -152,14 +180,20 @@ impl FrameType {
 /// Wire header for Yamux frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
+    /// Yamux protocol version (currently always 0).
     pub version: u8,
+    /// Frame type discriminant.
     pub type_: FrameType,
+    /// Frame flags (SYN/ACK/FIN/RST).
     pub flags: Flags,
+    /// Destination stream identifier.
     pub stream_id: StreamID,
+    /// Payload length or control value (depends on frame type).
     pub length: u32,
 }
 
 impl Header {
+    /// Constructs a new header for Yamux protocol version 0.
     pub fn new(type_: FrameType, flags: Flags, stream_id: StreamID, length: u32) -> Self {
         Self {
             version: 0,

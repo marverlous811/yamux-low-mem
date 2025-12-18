@@ -1,3 +1,11 @@
+//! Session orchestration for Yamux multiplexing.
+//!
+//! A [`YamuxSession`] drives a [`crate::transport::YamuxTransport`] and maintains the set of
+//! active stream state machines (see [`crate::stream::YamuxStreamHead`]).
+//!
+//! The session itself implements [`futures::Stream`]; polling it advances both inbound and
+//! outbound traffic and yields newly accepted [`crate::stream::YamuxStream`] handles.
+
 use std::{
     collections::{HashMap, VecDeque},
     pin::Pin,
@@ -12,6 +20,8 @@ use crate::{
     stream::{YamuxStream, YamuxStreamHead, accept_stream, open_stream},
     transport::YamuxTransport,
 };
+
+// === Session type ===
 
 /// Multiplexes logical Yamux streams over an async transport.
 pub struct YamuxSession<T: AsyncRead + AsyncWrite + Unpin> {
@@ -33,6 +43,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxSession<T> {
         Self::new(stream, false, max_write_buffer)
     }
 
+    /// Creates a session and selects the next outbound stream identifier.
     fn new(stream: T, is_server: bool, max_write_buffer: usize) -> Self {
         let start = if is_server {
             2
@@ -49,6 +60,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxSession<T> {
     }
 
     /// Opens a new outbound stream.
+    ///
+    /// The returned [`YamuxStream`] becomes usable once the remote acknowledges the stream.
     pub fn open_stream(&mut self) -> YamuxStream {
         let stream_id = StreamID(self.next_stream_id);
         self.next_stream_id = self.next_stream_id.wrapping_add(2);
@@ -58,7 +71,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxSession<T> {
         stream
     }
 
-    /// Close connection
+    /// Starts a graceful session shutdown by queueing a GoAway frame.
+    ///
+    /// After calling this, polling the session continues flushing queued frames
+    /// until the underlying transport closes.
     pub fn close(&mut self, code: u32) {
         self.out_queue.push_back(Frame::Session(FrameSessionEvent::GoAway(code)));
         self.manual_close = true;

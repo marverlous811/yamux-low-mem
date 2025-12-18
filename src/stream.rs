@@ -1,3 +1,12 @@
+//! Logical Yamux stream state and user-facing I/O handle.
+//!
+//! Yamux models each logical stream as a small state machine plus a byte-oriented handle.
+//! This module splits that into two parts:
+//! - [`YamuxStreamHead`] is driven by the session and converts between I/O intent and
+//!   [`crate::frame::FrameStreamEvent`] values.
+//! - [`YamuxStream`] is exposed to users and implements [`futures::AsyncRead`] and
+//!   [`futures::AsyncWrite`].
+
 use std::{
     collections::VecDeque,
     pin::Pin,
@@ -15,14 +24,20 @@ use crate::{
     packet::{Flags, FlagsBuilder},
 };
 
+// === Constants ===
+
 /// Initial per-stream flow-control window in bytes.
 pub const INITIAL_WINDOW: u32 = 256 * 1024;
 
+// === Internal state ===
+
+/// Tracks whether each half of a stream is still open.
 struct State {
     local: bool,
     remote: bool,
 }
 
+/// Tracks per-stream send/receive flow-control windows.
 struct Window {
     // store how many byte we can send
     send: usize,
@@ -31,10 +46,13 @@ struct Window {
 }
 
 impl State {
+    /// True when both the local and remote halves are closed.
     fn is_closed(&self) -> bool {
         !self.local && !self.remote
     }
 }
+
+// === Stream head (session-driven) ===
 
 /// Internal state machine that turns stream I/O into [`FrameStreamEvent`] values.
 ///
@@ -51,6 +69,7 @@ pub struct YamuxStreamHead {
 }
 
 impl YamuxStreamHead {
+    /// Creates a new outbound stream head (initiates with `SYN`).
     fn open(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
         let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::default().syn(true).build().expect("should build ok"), INITIAL_WINDOW);
         Self {
@@ -66,6 +85,7 @@ impl YamuxStreamHead {
         }
     }
 
+    /// Creates a new inbound stream head (acknowledges with `ACK`).
     fn accept(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
         let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::default().ack(true).build().expect("should build ok"), INITIAL_WINDOW);
         Self {
@@ -82,6 +102,11 @@ impl YamuxStreamHead {
     }
 
     /// Handles an incoming frame for this stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error with kind [`std::io::ErrorKind::InvalidData`] when the inbound
+    /// sequence violates the expected Yamux data header/chunk ordering.
     pub fn on_input(&mut self, event: FrameStreamEvent) -> std::io::Result<()> {
         match event {
             FrameStreamEvent::Data(flags, size) => {
@@ -123,6 +148,7 @@ impl YamuxStreamHead {
         }
     }
 
+    /// Applies stream state transitions implied by control flags.
     fn handle_flag(&mut self, flag: Flags) {
         if flag.ack {
             log::info!("[YamuxStreamHead] received ack => remote opened");
@@ -142,6 +168,7 @@ impl YamuxStreamHead {
         }
     }
 
+    /// Records received bytes and schedules window update frames when needed.
     fn mark_received_bytes(&mut self, received: usize) {
         self.window.recv += received;
         // auto send WindowUpdate when we received INITIAL_WINDOW
@@ -198,6 +225,8 @@ impl Stream for YamuxStreamHead {
         }
     }
 }
+
+// === User-facing stream handle ===
 
 /// User-facing half of a logical Yamux stream.
 pub struct YamuxStream {
@@ -286,6 +315,11 @@ mod tests {
 
     #[test]
     fn accept_stream_should_able_to_send_data() {
+        //TODO
+    }
+
+    #[test]
+    fn haft_close_should_send_fin() {
         //TODO
     }
 

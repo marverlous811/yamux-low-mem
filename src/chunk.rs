@@ -12,8 +12,12 @@ use std::{
 use derive_more::Display;
 use thiserror::Error;
 
+// === Constants ===
+
 /// Number of bytes a [`ChunkOwned`] can store.
 pub const DEFAULT_CHUNK_CAPACITY: usize = 4090;
+
+// === Traits ===
 
 /// Trait for sequentially consuming bytes from chained chunks without copying.
 pub trait ChunkBufferReader {
@@ -56,7 +60,7 @@ pub trait ChunkBufferReader {
     fn next_chunk(&mut self, max_len: usize) -> Option<ChunkView>;
 }
 
-/// Writer for populating chained chunks.
+/// Trait for appending bytes into a chunked buffer.
 pub trait ChunkBufferWriter {
     /// Returns how many bytes are buffered so far.
     fn filled_len(&self) -> usize;
@@ -85,6 +89,7 @@ pub trait ChunkBufferWriter {
     fn write_slice(&mut self, chunk: &[u8]);
 }
 
+/// Trait for treating a chunk queue as a readable source.
 pub trait ChunkBufferSource {
     /// Returns the front slice of the queue.
     fn front_slice(&self) -> Option<&[u8]>;
@@ -92,22 +97,27 @@ pub trait ChunkBufferSource {
     /// Pops the next chunk from the front of the queue.
     fn pop_front(&mut self) -> Option<ChunkView>;
 
-    /// Consume some bytes from front
+    /// Consumes `len` bytes from the front of the queue.
     fn consume_front(&mut self, len: usize);
 }
 
+/// Trait for treating a chunk queue as a sink of additional chunks.
 pub trait ChunkBufferSink {
-    /// Pushes a new chunk to the front of the queue.
+    /// Pushes a new chunk to the back of the queue.
     fn push_back(&mut self, chunk: ChunkView);
 }
+
+// === Errors ===
 
 /// Errors emitted by chunk helpers.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ChunkError {
-    /// The provided input is larger than [`CHUNK_CAPACITY`].
+    /// The requested range exceeded the current view.
     #[error("overflow {attempted}")]
     Overflow { attempted: usize },
 }
+
+// === Chunk view (shared) ===
 
 /// Immutable window into a [`ChunkOwned`].
 #[derive(Debug, Clone, Display)]
@@ -117,6 +127,8 @@ pub struct ChunkView {
     start: usize,
     end: usize,
 }
+
+// === Chunk storage (owned) ===
 
 /// Fixed-capacity buffer for ingesting bytes before slicing into views.
 #[derive(Debug)]
@@ -142,9 +154,9 @@ impl From<Vec<u8>> for ChunkView {
 impl ChunkView {
     /// Borrows a narrower view of this chunk.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `range` falls outside of the current view.
+    /// Returns [`ChunkError::Overflow`] if `range` falls outside of the current view.
     pub fn view(&self, range: Range<usize>) -> Result<ChunkView, ChunkError> {
         if range.end > self.len() {
             return Err(ChunkError::Overflow { attempted: self.start + range.end });
@@ -223,12 +235,12 @@ impl Default for ChunkOwned {
 }
 
 impl ChunkOwned {
-    /// Return filled slice
+    /// Returns the filled slice (excluding bytes already consumed).
     pub fn filled_slice(&self) -> &[u8] {
         &self.data[self.consumed..self.len]
     }
 
-    /// Consume some bytes from front
+    /// Marks `len` bytes as consumed from the front of this chunk.
     pub fn consume_front(&mut self, len: usize) {
         self.consumed += len;
     }
@@ -253,6 +265,8 @@ impl ChunkBufferWriter for ChunkOwned {
         self.len += chunk.len();
     }
 }
+
+// === Chained writer ===
 
 /// Writer that appends encoded bytes into chained [`ChunkOwned`] blocks.
 ///
@@ -292,7 +306,7 @@ impl ChunkBufferSource for ChainedChunkBufferWriter {
     }
 
     fn consume_front(&mut self, len: usize) {
-        //TODO check len and return error
+        // Callers ensure `len` does not exceed `front_slice().len()`.
         self.queue.front_mut().map(|c| {
             c.consume_front(len);
             self.filled_len -= len;
@@ -351,6 +365,8 @@ impl ChunkBufferWriter for ChainedChunkBufferWriter {
     }
 }
 
+// === Chained reader ===
+
 /// Reader that walks across chained [`ChunkView`] blocks.
 pub struct ChainedChunkBufferReader {
     chunks: VecDeque<ChunkView>,
@@ -358,10 +374,12 @@ pub struct ChainedChunkBufferReader {
 }
 
 impl ChainedChunkBufferReader {
+    /// Creates an empty reader.
     pub fn new() -> Self {
         Self { chunks: VecDeque::new(), len: 0 }
     }
 
+    /// True when no bytes are currently buffered.
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
     }

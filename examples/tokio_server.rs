@@ -1,8 +1,14 @@
+//! Minimal Tokio-based Yamux server example.
+//!
+//! Listens on `127.0.0.1:8080`, accepts inbound Yamux streams, reads a single message,
+//! and echoes it back.
+
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use yamux_low_mem::session::YamuxSession;
 
 #[tokio::main]
+/// Runs the example server.
 async fn main() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await.unwrap();
     println!("Server listening on 127.0.0.1:8080");

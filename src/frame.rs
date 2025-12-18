@@ -11,11 +11,16 @@ use crate::{
     packet::{Flags, FrameType, Header, ParserError, StreamID},
 };
 
+// === Internal state ===
+
+/// Tracks payload bytes remaining for a data frame currently being streamed.
 #[derive(Debug)]
 struct PendingPayload {
     stream_id: StreamID,
     remain: usize,
 }
+
+// === Reader ===
 
 /// Stateful reader that yields metadata and payload chunks separately.
 ///
@@ -72,8 +77,15 @@ impl<R: ChunkBufferReader + ChunkBufferSink> FrameReader<R> {
     }
 }
 
+// === Writer ===
+
+/// Errors returned by [`FrameWriter::write`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameWriterError {
+    /// The stream identifier for a [`FrameStreamEvent::DataChunk`] did not match
+    /// the stream currently being written.
     InvalidStreamId,
+    /// A non-chunk frame was provided while a payload was still pending.
     UnexpectedFrameType,
 }
 
@@ -90,11 +102,12 @@ impl<W: ChunkBufferWriter + ChunkBufferSource> FrameWriter<W> {
         Self { pending: None, buffer }
     }
 
-    /// Return buffer
+    /// Returns a mutable reference to the underlying buffer.
     pub fn buffer_mut(&mut self) -> &mut W {
         &mut self.buffer
     }
 
+    /// Returns the inner buffer, discarding writer state.
     pub fn take(self) -> W {
         self.buffer
     }
@@ -105,6 +118,12 @@ impl<W: ChunkBufferWriter + ChunkBufferSource> FrameWriter<W> {
     }
 
     /// Writes the next frame or chunk into the owned buffer, enforcing payload sizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameWriterError::InvalidStreamId`] if a data chunk is written for a
+    /// different stream than the most recent data header, or [`FrameWriterError::UnexpectedFrameType`]
+    /// if a non-chunk frame is written while a payload is pending.
     pub fn write(&mut self, frame: Frame) -> Result<(), FrameWriterError> {
         if let Some(pending) = self.pending.as_mut() {
             // Handle pending data chunk
@@ -135,6 +154,8 @@ impl<W: ChunkBufferWriter + ChunkBufferSource> FrameWriter<W> {
     }
 }
 
+// === Events ===
+
 /// Stream-directed events.
 #[derive(Debug, Clone, PartialEq, Eq, Display)]
 pub enum FrameStreamEvent {
@@ -150,6 +171,7 @@ pub enum FrameStreamEvent {
 }
 
 impl FrameStreamEvent {
+    /// Returns flags for events that carry them.
     pub fn flags(&self) -> Option<Flags> {
         match self {
             Self::Data(flags, _) | Self::WindowUpdate(flags, _) => Some(*flags),
@@ -167,6 +189,8 @@ pub enum FrameSessionEvent {
     /// GoAway frame (error payload not yet modeled).
     GoAway(u32),
 }
+
+// === Frame ===
 
 /// Yamux frame variants.
 #[derive(Debug, Clone, PartialEq, Eq, Display)]

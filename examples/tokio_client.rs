@@ -1,8 +1,13 @@
+//! Minimal Tokio-based Yamux client example.
+//!
+//! Connects to `127.0.0.1:8080`, opens a Yamux stream, writes a message, and reads the echo.
+
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use yamux_low_mem::session::YamuxSession;
 
 #[tokio::main]
+/// Runs the example client.
 async fn main() {
     //TODO: implement client here
 

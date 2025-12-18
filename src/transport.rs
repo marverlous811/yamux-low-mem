@@ -7,6 +7,8 @@ use futures::{AsyncRead, AsyncWrite, Sink, Stream};
 use crate::chunk::{ChainedChunkBufferReader, ChainedChunkBufferWriter, ChunkBufferSource, ChunkBufferWriter};
 use crate::frame::{Frame, FrameReader, FrameWriter};
 
+// === Transport ===
+
 /// Adapts an `AsyncRead`/`AsyncWrite` stream into Yamux frames using chunked buffers.
 ///
 /// The transport encodes frames via [`FrameWriter`] into `ChunkOwned` blocks and writes
@@ -30,6 +32,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxTransport<T> {
         }
     }
 
+    /// Flushes buffered encoded bytes to the underlying stream.
+    ///
+    /// This method drains the internal [`ChainedChunkBufferWriter`] by repeatedly polling
+    /// the wrapped I/O object. It returns [`Poll::Pending`] as soon as the underlying
+    /// stream would block.
     fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         // pop front as long as we can write
         while let Some(front) = self.writer.buffer_mut().front_slice() {

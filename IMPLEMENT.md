@@ -1,55 +1,92 @@
-Here is implement details and plans:
+# High-level design
 
-# Goal
+This document describes the *architecture* of `yamux-low-mem` and the key design choices that
+keep allocations small. It intentionally avoids going into code-level details.
 
-Create a yamux multiplexing protocol library in Rust and futures style for:
+For the on-the-wire protocol, see `SPEC.md`.
 
-- low memory consume
-- simple to use
-- stable (make it simple as much as possible)
+## Goals
 
-# How to make it
+- **Bounded memory per stream**: avoid large per-stream buffers; keep buffering in small,
+  reusable chunks.
+- **Futures-first API**: expose `futures::AsyncRead` / `futures::AsyncWrite` for stream I/O and
+  `futures::Stream` for session acceptance.
+- **Simple integration**: work well in async applications (including Tokio via compat).
 
-For memory effecient, we use block is 4090 bytes for storing data (both incoming and outgoing). We have 2 kinds of block: ChunkOwned and ChunkView, were Owned is used for write (when reading form socket or encoding from outgoing queue), ChunkView is used for clone and reference to small part or data, which is very useful when parsing.
+## Non-goals (current scope)
 
-We create a ChainedChunkBuffer which can push more chunk, and we can do some byte wise operation in that, then we can easily parse or construct yamux frames from it. For avoiding malloc big memory for big data frame, we can pop data as incremental frames like:
+- Being a feature-complete drop-in replacement for every existing Yamux implementation.
+- Aggressive performance tuning beyond eliminating large allocations.
+- A fully stable API (this crate is still experimental).
 
-```rust
-enum YamuxFrame {
-    Header {
-        version: u8,
-        f_type: FrameType,
-        flags: FrameFlags,
-        stream_id: u32,
-        length: u32,
-    },
-    DataFrame {
-        stream_id: u32,
-        seq: usize,
-        remain: usize, //remain = 0 for last data frame
-        data: ChunkView
-    }
-}
-```
+## Architecture (layers)
 
-Based on above chunked logic, we can implement Yamux protocol and provide futures::io::AsyncRead and futures::io::AsyncWrite with tokio for integrating with other system without headache.
+The implementation is organized into a few layers, each with a single job:
 
-```rust
-let mut session = YamuxSession::server(tcp_stream);
+1. **Chunked buffers**
+   - The fundamental storage unit is a fixed-capacity chunk.
+   - Incoming bytes are appended to a queue of chunks; parsing consumes from the front.
+   - Outgoing bytes are encoded into chunks and drained to the underlying transport.
 
-// Create stream
-let mut out_stream = session.open_stream();
+2. **Frame codec**
+   - Parses and encodes Yamux headers using the chunked buffer interfaces.
+   - Data payloads are *streamed* as a sequence of chunk views rather than copied into a
+     contiguous buffer.
 
-// Receive stream as futures::Stream trait
-let mut in_stream = session.next().await?;
-```
+3. **Transport**
+   - Wraps an `AsyncRead + AsyncWrite` stream and exposes `Sink<Frame> + Stream<Item = Frame>`.
+   - Enforces a configurable maximum buffered write size for backpressure.
 
-# Plans
+4. **Session**
+   - Owns the transport and the set of active stream state machines.
+   - Polling the session drives:
+     - inbound frame handling (including new-stream acceptance), and
+     - outbound flushing (control frames + stream data).
+   - The session itself implements `Stream<Item = YamuxStream>` and yields newly accepted
+     streams to the application.
 
-- [ ] Create ChunkOwned and ChunkView mock, write tests
-- [ ] Create ChainedChunkBuffer mock, write tests
-- [ ] Create YamuxDataStream = Stream<Frame> + Sink<Frame> for receiving and sending frames in async
-- [ ] Create YamuxStream which is futures::io::AsyncRead + futures::io::AsyncWrite with internal is use ChunkOwned, ChunkView for storing incoming/outgoing data without big buffer, which can save alot of memory in case we have many concurrent streams, write tests for ensuring it works
-- [ ] Create YamuxSession which take YamuxDataStream and implement yamux logic then create YamuxStream, write all tests include edge cases
-- [ ] Write self-test with both server/client for make sure it works
-- [ ] Write e2e test with https://docs.rs/yamux/0.13.8/yamux/ for ensuring works with other system
+5. **Streams**
+   - Each logical Yamux stream is split into:
+     - a session-driven “head” state machine that translates between protocol frames and a
+       byte stream, and
+     - a user-facing `YamuxStream` that implements `AsyncRead`/`AsyncWrite`.
+
+## Data path and memory bounds
+
+### Inbound (remote → local)
+
+- The transport reads bytes from the underlying stream into fixed-size chunks.
+- The frame codec parses headers without copying and then streams data payloads as chunk
+  slices.
+- Stream heads forward inbound data to the user-facing `YamuxStream` as chunk views.
+
+Memory is bounded by:
+- the amount of unread inbound data in the transport’s chunk queue, and
+- per-stream queued data waiting for the application to read.
+
+### Outbound (local → remote)
+
+- The application writes to `YamuxStream`.
+- Stream heads translate that into a sequence of Yamux DATA frames and enforce per-stream flow
+  control.
+- The session queues outbound frames and the transport encodes them into chunked buffers.
+
+Memory is bounded by:
+- per-stream buffered writes (chunk-sized), and
+- a global maximum buffered writer size in the transport (backpressure).
+
+## Flow control and stream lifecycle
+
+- Each stream starts with an initial receive window (per the Yamux spec).
+- Window update frames are emitted as inbound data is consumed so the peer can continue
+  sending.
+- Streams support half-close semantics via `FIN`, and can be hard-reset via `RST` when needed.
+
+## Usage model (important)
+
+`YamuxSession` is the “driver” of the protocol: it must be polled for the transport to read,
+write, flush, and deliver inbound streams. Typical applications do one of:
+
+- Run the session in a background task and handle inbound streams through a channel, or
+- Poll the session in the main async loop (often using `select!`) and spawn a task per inbound
+  `YamuxStream`.

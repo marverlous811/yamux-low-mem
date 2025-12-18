@@ -174,7 +174,7 @@ impl Header {
     ///
     /// Returns `Ok(None)` when fewer than [`HEADER_LEN`] bytes are available.
     pub fn read(buffer: &mut impl ChunkBufferReader) -> Result<Option<Self>, ParserError> {
-        if buffer.remaining() < HEADER_LEN {
+        if buffer.len() < HEADER_LEN {
             return Ok(None);
         }
 

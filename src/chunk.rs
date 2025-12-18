@@ -6,14 +6,16 @@
 use std::{collections::VecDeque, ops::Range, sync::Arc};
 
 use derive_more::Display;
+use thiserror::Error;
 
 /// Number of bytes a [`ChunkOwned`] can store.
 pub const CHUNK_CAPACITY: usize = 4090;
 
 /// Trait for sequentially consuming bytes from chained chunks without copying.
 pub trait ChunkBufferReader {
-    /// Returns how many bytes are available to read.
-    fn remaining(&self) -> usize;
+    /// Returns how many bytes are buffered so far.
+    fn len(&self) -> usize;
+
     /// Pulls the next byte if available.
     fn next_u8(&mut self) -> Option<u8>;
     /// Pulls two bytes in network order.
@@ -28,6 +30,7 @@ pub trait ChunkBufferReader {
 pub trait ChunkBufferWriter {
     /// Returns how many bytes are buffered so far.
     fn len(&self) -> usize;
+
     /// True when no bytes are buffered.
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -69,23 +72,12 @@ pub struct ChunkOwned {
 }
 
 /// Errors emitted by chunk helpers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ChunkError {
     /// The provided input is larger than [`CHUNK_CAPACITY`].
+    #[error("overflow {attempted}")]
     Overflow { attempted: usize },
 }
-
-impl std::fmt::Display for ChunkError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ChunkError::Overflow { attempted } => {
-                write!(f, "attempted to store {attempted} bytes in a chunk")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ChunkError {}
 
 impl From<Vec<u8>> for ChunkOwned {
     fn from(value: Vec<u8>) -> Self {
@@ -233,19 +225,24 @@ impl Eq for ChunkView {}
 /// without inlining capacity checks.
 pub struct ChainedChunkBufferWriter {
     queue: VecDeque<ChunkOwned>,
-    offset: usize,
+    len: usize,
+    front_offset: usize,
 }
 
 impl ChainedChunkBufferWriter {
     /// Creates an empty chunk queue.
     pub fn new() -> Self {
-        Self { queue: VecDeque::new(), offset: 0 }
+        Self {
+            queue: VecDeque::new(),
+            len: 0,
+            front_offset: 0,
+        }
     }
 
     /// Borrows the next available bytes for flushing to an I/O sink.
     pub fn front_slice(&self) -> Option<&[u8]> {
         let front = self.queue.front()?;
-        Some(&front.as_slice()[self.offset..])
+        Some(&front.as_slice()[self.front_offset..])
     }
 
     /// Advances the current chunk by `len` bytes, dropping it when fully consumed.
@@ -255,11 +252,11 @@ impl ChainedChunkBufferWriter {
     /// Panics if `len` exceeds the remaining bytes in the front chunk.
     pub fn consume_front(&mut self, len: usize) {
         if let Some(front) = self.queue.front() {
-            assert!(self.offset + len <= front.len(), "consume beyond chunk length");
-            self.offset += len;
-            if self.offset == front.len() {
+            assert!(self.front_offset + len <= front.len(), "consume beyond chunk length");
+            self.front_offset += len;
+            if self.front_offset == front.len() {
                 self.queue.pop_front();
-                self.offset = 0;
+                self.front_offset = 0;
             }
         } else {
             assert_eq!(len, 0, "consume on empty queue");
@@ -267,6 +264,7 @@ impl ChainedChunkBufferWriter {
     }
 
     /// Exposes buffered data as a contiguous vector (primarily for tests).
+    #[cfg(test)]
     pub fn into_bytes(self) -> Vec<u8> {
         self.queue.into_iter().flat_map(|c| c.as_slice().to_vec()).collect()
     }
@@ -286,21 +284,20 @@ impl Default for ChainedChunkBufferWriter {
 
 impl ChunkBufferSource for ChainedChunkBufferWriter {
     fn pop_front(&mut self) -> Option<ChunkView> {
-        self.queue.pop_front().map(|c| c.into())
+        self.queue.pop_front().map(|c| {
+            self.len -= c.len();
+            c.into()
+        })
     }
 }
 
 impl ChunkBufferWriter for ChainedChunkBufferWriter {
     fn len(&self) -> usize {
-        let mut iter = self.queue.iter();
-        let first = match iter.next() {
-            Some(front) => front.len().saturating_sub(self.offset),
-            None => return 0,
-        };
-        first + iter.map(ChunkOwned::len).sum::<usize>()
+        self.len
     }
 
     fn write_u8(&mut self, byte: u8) {
+        self.len += 1;
         self.ensure_tail();
         let tail = self.queue.back_mut().expect("tail exists");
         if tail.push(byte) {
@@ -336,30 +333,30 @@ impl ChunkBufferWriter for ChainedChunkBufferWriter {
 /// Reader that walks across chained [`ChunkView`] blocks.
 pub struct ChainedChunkBufferReader {
     chunks: VecDeque<ChunkView>,
+    front_offset: usize,
+    len: usize,
 }
 
 impl ChainedChunkBufferReader {
     pub fn new() -> Self {
-        Self { chunks: VecDeque::new() }
-    }
-
-    pub fn push_back(&mut self, chunk: ChunkView) {
-        self.chunks.push_back(chunk);
-    }
-
-    pub fn len(&self) -> usize {
-        self.chunks.iter().map(ChunkView::len).sum()
+        Self {
+            chunks: VecDeque::new(),
+            front_offset: 0,
+            len: 0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.chunks.is_empty()
     }
 }
 
 impl From<Vec<u8>> for ChainedChunkBufferReader {
     fn from(value: Vec<u8>) -> Self {
         Self {
+            len: value.len(),
             chunks: VecDeque::from_iter([ChunkOwned::from(value).into()]),
+            front_offset: 0,
         }
     }
 }
@@ -367,7 +364,9 @@ impl From<Vec<u8>> for ChainedChunkBufferReader {
 impl From<ChainedChunkBufferWriter> for ChainedChunkBufferReader {
     fn from(value: ChainedChunkBufferWriter) -> Self {
         Self {
+            len: value.len(),
             chunks: VecDeque::from_iter(value.queue.into_iter().map(|c| c.into())),
+            front_offset: 0,
         }
     }
 }
@@ -380,30 +379,28 @@ impl Default for ChainedChunkBufferReader {
 
 impl ChunkBufferSink for ChainedChunkBufferReader {
     fn push_back(&mut self, chunk: ChunkView) {
-        self.chunks.push_front(chunk);
+        self.len += chunk.len();
+        self.chunks.push_back(chunk);
     }
 }
 
 impl ChunkBufferReader for ChainedChunkBufferReader {
-    fn remaining(&self) -> usize {
-        self.len()
+    fn len(&self) -> usize {
+        self.len
     }
 
     fn next_u8(&mut self) -> Option<u8> {
-        loop {
-            let front = self.chunks.front_mut()?;
-            if front.start == front.end {
-                self.chunks.pop_front();
-                continue;
-            }
-            let idx = front.start;
-            front.start += 1;
-            let byte = front.data.data[idx];
-            if front.start == front.end {
-                self.chunks.pop_front();
-            }
-            return Some(byte);
+        let front = self.chunks.front()?;
+        let value = front.as_slice()[self.front_offset];
+        self.front_offset += 1;
+        self.len -= 1;
+
+        if self.front_offset == front.len() {
+            self.chunks.pop_front();
+            self.front_offset = 0;
         }
+
+        Some(value)
     }
 
     fn next_u16(&mut self) -> Option<u16> {
@@ -427,28 +424,61 @@ impl ChunkBufferReader for ChainedChunkBufferReader {
     }
 
     fn next_chunk(&mut self, max_len: usize) -> Option<ChunkView> {
-        loop {
-            let front = self.chunks.front_mut()?;
-            let len = front.len();
-            if len == 0 {
-                self.chunks.pop_front();
-                continue;
-            }
-
-            let take = len.min(max_len);
-            let start = front.start;
-            let end = start + take;
-            front.start = end;
-
-            let view = ChunkView {
-                data: Arc::clone(&front.data),
-                start,
-                end,
-            };
-            if front.start == front.end {
-                self.chunks.pop_front();
-            }
-            return Some(view);
+        let front = self.chunks.front()?;
+        if front.len() - self.front_offset > max_len {
+            let out = front.view(self.front_offset..self.front_offset + max_len).expect("should got child view");
+            self.front_offset += max_len;
+            self.len -= max_len;
+            Some(out)
+        } else {
+            let out: ChunkView = front.view(self.front_offset..front.len()).expect("should got child view");
+            self.chunks.pop_front();
+            self.front_offset = 0;
+            self.len -= out.len();
+            Some(out)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn chunk_view_build_from_vec() {
+        //TODO
+    }
+
+    #[test]
+    fn chunk_view_subview() {
+        //TODO
+    }
+
+    #[test]
+    fn chunk_owned_build_from_vec() {
+        //TODO
+    }
+
+    #[test]
+    fn chunk_owned_push() {
+        //TODO
+    }
+
+    #[test]
+    fn chunk_owned_to_view() {
+        //TODO
+    }
+
+    #[test]
+    fn chunk_owned_extend_slice() {
+        //TODO
+    }
+
+    #[test]
+    fn chain_chunk_buffer_writer_write_datas() {
+        //TODO
+    }
+
+    #[test]
+    fn chain_chunk_buffer_writer_pop() {
+        //TODO
     }
 }

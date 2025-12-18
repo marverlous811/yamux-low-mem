@@ -84,6 +84,7 @@ impl YamuxStreamHead {
     /// Creates a new outbound stream head (initiates with `SYN`).
     fn open(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
         let init_pkt = FrameStreamEvent::WindowUpdate(Flags::syn(), INITIAL_WINDOW);
+        log::info!("[YamuxStreamHead] open stream");
         Self {
             tx,
             rx,
@@ -100,6 +101,7 @@ impl YamuxStreamHead {
     /// Creates a new inbound stream head (acknowledges with `ACK`).
     fn accept(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
         let init_pkt = FrameStreamEvent::WindowUpdate(Flags::ack(), INITIAL_WINDOW);
+        log::info!("[YamuxStreamHead] accept stream");
         Self {
             tx,
             rx,
@@ -123,9 +125,11 @@ impl YamuxStreamHead {
         match event {
             FrameStreamEvent::Data(flags, size) => {
                 if self.recv_state.is_some() {
+                    log::warn!("[YamuxStreamHead] received data while waiting for data chunk");
                     return Err(YamuxStreamHeadError::InvalidFrameType);
                 }
 
+                log::debug!("[YamuxStreamHead] received data with flags {flags}, size {size} bytes");
                 self.handle_flag(flags);
                 self.recv_state = Some(size as usize);
 
@@ -134,26 +138,32 @@ impl YamuxStreamHead {
             FrameStreamEvent::DataChunk(chunk_view) => {
                 if let Some(recv_state) = &mut self.recv_state {
                     if *recv_state < chunk_view.len() {
+                        log::warn!("[YamuxStreamHead] received data chunk with size {} bytes, but expected {} bytes", chunk_view.len(), recv_state);
                         return Err(YamuxStreamHeadError::InvalidDataChunkSize);
                     }
 
                     *recv_state -= chunk_view.len();
                     let received_len = chunk_view.len();
                     if self.tx.unbounded_send(chunk_view).is_err() {
+                        log::error!("[YamuxStreamHead] failed to send data chunk to local stream");
                         return Err(YamuxStreamHeadError::InternalChannelError);
                     }
 
                     if *recv_state == 0 {
+                        log::debug!("[YamuxStreamHead] received all data chunk");
                         self.recv_state = None;
                     }
 
+                    log::debug!("[YamuxStreamHead] mark received bytes {received_len}");
                     self.mark_received_bytes(received_len);
                     Ok(())
                 } else {
+                    log::warn!("[YamuxStreamHead] received data chunk without receiving state");
                     Err(YamuxStreamHeadError::InvalidFrameType)
                 }
             }
             FrameStreamEvent::WindowUpdate(flags, delta) => {
+                log::debug!("[YamuxStreamHead] received window update with flags {flags}, delta {delta}");
                 self.handle_flag(flags);
                 self.window.send += delta as usize;
 
@@ -200,23 +210,27 @@ impl Stream for YamuxStreamHead {
         let this = self.get_mut();
 
         if let Some(out) = this.outs.pop_front() {
+            log::debug!("[YamuxStreamHead] pop next => {out}");
             return Poll::Ready(Some(out));
         }
 
         if this.state.is_closed() {
             // both local and remote are closed => stream is closed
+            log::info!("[YamuxStreamHead] both local and remote are closed => stream is closed");
             return Poll::Ready(None);
         }
 
         // We need to wait for remote to open (wait ack) before sending application data,
         // but we may still have control frames buffered in `outs` (e.g. initial SYN/ACK).
         if !this.state.remote {
+            log::debug!("[YamuxStreamHead] remote not opened => wait");
             return Poll::Pending;
         }
 
         // We need to wait for more capacity to be available.
         // This implementation only sends in `DEFAULT_CHUNK_CAPACITY` sized increments.
         if this.window.send < DEFAULT_CHUNK_CAPACITY {
+            log::debug!("[YamuxStreamHead] window send {} < DEFAULT_CHUNK_CAPACITY {} => wait", this.window.send, DEFAULT_CHUNK_CAPACITY);
             return Poll::Pending;
         }
 
@@ -224,11 +238,13 @@ impl Stream for YamuxStreamHead {
             while let Poll::Ready(event) = this.rx.poll_next_unpin(cx) {
                 match event {
                     Some(chunk) => {
+                        log::info!("[YamuxStreamHead] received from local stream => send data chunk {} bytes", chunk.len());
                         this.window.send = this.window.send.saturating_sub(chunk.len());
                         this.outs.push_back(FrameStreamEvent::Data(Flags::empty(), chunk.len() as u32));
                         this.outs.push_back(FrameStreamEvent::DataChunk(chunk));
                     }
                     None => {
+                        log::info!("[YamuxStreamHead] local stream closed => send fin");
                         // Local side closed: send FIN once and keep the stream alive for inbound reads.
                         this.state.local = false;
                         this.outs.push_back(FrameStreamEvent::Data(Flags::fin(), 0));
@@ -239,6 +255,7 @@ impl Stream for YamuxStreamHead {
         }
 
         if let Some(out) = this.outs.pop_front() {
+            log::debug!("[YamuxStreamHead] pop next => {out}");
             Poll::Ready(Some(out))
         } else {
             Poll::Pending
@@ -263,6 +280,7 @@ impl AsyncRead for YamuxStream {
         if this.recv_chunk.is_none() {
             if let Poll::Ready(event) = this.rx.poll_next_unpin(cx) {
                 if let Some(chunk) = event {
+                    log::debug!("[YamuxStream] received {} bytes from remote", chunk.len());
                     this.recv_chunk = Some((chunk, 0));
                 } else {
                     return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "internal channel closed")));
@@ -272,9 +290,11 @@ impl AsyncRead for YamuxStream {
 
         if let Some((chunk, offset)) = &mut this.recv_chunk {
             let read_len = (chunk.len() - *offset).min(buf.len());
+            log::debug!("[YamuxStream] local read {} bytes", read_len);
             buf[..read_len].copy_from_slice(&chunk[*offset..*offset + read_len]);
             *offset += read_len;
             if *offset == chunk.len() {
+                log::debug!("[YamuxStream] local read all current chunk with {} bytes", chunk.len());
                 this.recv_chunk = None;
             }
             return Poll::Ready(Ok(read_len));
@@ -294,8 +314,10 @@ impl AsyncWrite for YamuxStream {
             }
             let send_len = buf.len().min(DEFAULT_CHUNK_CAPACITY);
             if let Err(e) = this.tx.start_send(buf[..send_len].to_vec().into()) {
+                log::error!("[YamuxStream] local failed to send {send_len} bytes to head: {e}");
                 return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
             }
+            log::debug!("[YamuxStream] local sent {send_len} bytes to head");
             return Poll::Ready(Ok(send_len));
         }
 
@@ -304,11 +326,13 @@ impl AsyncWrite for YamuxStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
+        log::debug!("[YamuxStream] local flush");
         this.tx.poll_flush_unpin(cx).map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
+        log::debug!("[YamuxStream] local close");
         this.tx.poll_close_unpin(cx).map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
     }
 }

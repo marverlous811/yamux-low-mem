@@ -51,6 +51,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxTransport<T> {
         while let Some(front) = self.writer.buffer_mut().front_slice() {
             match Pin::new(&mut self.stream).poll_write(cx, front).map_err(|e| YamuxTransportError::Io(e.to_string()))? {
                 Poll::Ready(written) => {
+                    log::debug!("[YamuxTransport] written {written} bytes");
                     self.writer.buffer_mut().consume_front(written);
                 }
                 Poll::Pending => return Poll::Pending,
@@ -81,6 +82,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame> for YamuxTransport<T> {
 
     fn start_send(self: Pin<&mut Self>, item: Frame) -> Result<(), Self::Error> {
         let this = self.get_mut();
+        log::debug!("[YamuxTransport] send frame {item}");
         item.write(this.writer.buffer_mut());
         Ok(())
     }
@@ -107,13 +109,26 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxTransport<T> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
+        match this.reader.next_frame() {
+            Ok(Some(frame)) => {
+                log::debug!("[YamuxTransport] got frame {frame}");
+                return Poll::Ready(Some(Ok(frame)));
+            }
+            Ok(None) => {}
+            Err(e) => return Poll::Ready(Some(Err(YamuxTransportError::ParserError(e)))),
+        }
+
         let mut buf = [0; 4096];
         while let Poll::Ready(event) = Pin::new(&mut this.stream).poll_read(cx, &mut buf) {
             match event {
                 Ok(len) => {
+                    log::debug!("[YamuxTransport] read {len} bytes");
                     this.reader.push_back(buf[..len].to_vec().into());
                     match this.reader.next_frame() {
-                        Ok(Some(frame)) => return Poll::Ready(Some(Ok(frame))),
+                        Ok(Some(frame)) => {
+                            log::debug!("[YamuxTransport] got frame {frame}");
+                            return Poll::Ready(Some(Ok(frame)));
+                        }
                         Ok(None) => continue,
                         Err(e) => return Poll::Ready(Some(Err(YamuxTransportError::ParserError(e)))),
                     }
@@ -138,8 +153,9 @@ mod tests {
     use tokio_util::compat::TokioAsyncReadCompatExt;
 
     use crate::{
-        frame::{Frame, FrameSessionEvent},
-        packet::Flags,
+        chunk::ChunkView,
+        frame::{Frame, FrameSessionEvent, FrameStreamEvent},
+        packet::{Flags, StreamID},
         transport::YamuxTransport,
     };
 
@@ -169,5 +185,37 @@ mod tests {
 
         // read from right
         assert_eq!(right.poll_next_unpin(&mut cx), Poll::Ready(Some(Ok(ping_frame))));
+    }
+
+    #[test]
+    /// Writes a data frame into one transport and reads it back from the peer transport.
+    ///
+    /// This test is deliberately "one hop":
+    /// - `poll_ready` must be `Ready` before `start_send`.
+    /// - `poll_flush` must be `Ready` to ensure bytes are pushed into the underlying stream.
+    /// - The peer must yield exactly one frame on the next `poll_next`.
+    fn pipe_2_streams_data() {
+        let (left, right) = tokio::io::duplex(64 * 1024);
+        let mut left = YamuxTransport::new(left.compat(), 64 * 1024);
+        let mut right = YamuxTransport::new(right.compat(), 64 * 1024);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let data_frame = Frame::Stream(StreamID(1), FrameStreamEvent::Data(Flags::empty(), 5));
+        let data_chunk = Frame::Stream(StreamID(1), FrameStreamEvent::DataChunk(ChunkView::from(vec![0; 5])));
+        assert_eq!(left.poll_ready_unpin(&mut cx), Poll::Ready(Ok(())));
+
+        // write to left
+        assert_eq!(left.start_send_unpin(data_frame.clone()), Ok(()));
+        assert_eq!(left.start_send_unpin(data_chunk.clone()), Ok(()));
+
+        // flush left
+        assert_eq!(left.poll_flush_unpin(&mut cx), Poll::Ready(Ok(())));
+
+        // read from right
+        assert_eq!(right.poll_next_unpin(&mut cx), Poll::Ready(Some(Ok(data_frame))));
+        assert_eq!(right.poll_next_unpin(&mut cx), Poll::Ready(Some(Ok(data_chunk))));
+        assert_eq!(right.poll_next_unpin(&mut cx), Poll::Pending);
     }
 }

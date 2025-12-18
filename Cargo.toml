@@ -4,12 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-derive_more = { version = "2.1", features = ["display"] }
+derive_more = { version = "2.1", features = ["display", "from"] }
 futures = "0.3"
 thiserror = "2.0"
 log = "0.4"
+anyhow = "1.0"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
-yamux = { version = "0.13.8" }
+tokio-yamux = "0.3"
+test-log = "0.2"
+anyhow = "1.0"

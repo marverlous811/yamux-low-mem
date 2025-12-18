@@ -41,3 +41,6 @@ pub mod packet;
 pub mod session;
 pub mod stream;
 pub mod transport;
+
+pub use session::YamuxSession;
+pub use stream::YamuxStream;

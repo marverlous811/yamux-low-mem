@@ -40,6 +40,7 @@ impl<R: ChunkBufferReader + ChunkBufferSink> FrameReader<R> {
 
     /// Pushes a new chunk to the back of the queue.
     pub fn push_back(&mut self, chunk: ChunkView) {
+        log::debug!("[FrameReader] push back chunk {} bytes", chunk.len());
         self.buffer.push_back(chunk);
     }
 
@@ -49,6 +50,12 @@ impl<R: ChunkBufferReader + ChunkBufferSink> FrameReader<R> {
     pub fn next_frame(&mut self) -> Result<Option<Frame>, ParserError> {
         // We need to continue reading data chunks utils it finishes
         if let Some(pending) = self.pending.as_mut() {
+            log::debug!(
+                "[FrameReader] pending data frame with stream id {} and remaining {} bytes, current buffer {}",
+                pending.stream_id,
+                pending.remain,
+                self.buffer.len()
+            );
             match self.buffer.next_chunk(pending.remain) {
                 None => return Ok(None),
                 Some(chunk) => {
@@ -66,6 +73,7 @@ impl<R: ChunkBufferReader + ChunkBufferSink> FrameReader<R> {
         match Frame::read(&mut self.buffer) {
             Ok(Some(frame)) => {
                 if let Frame::Stream(stream_id, FrameStreamEvent::Data(_, size)) = frame {
+                    log::info!("[FrameReader] got data frame with stream id {} and size {} bytes", stream_id, size);
                     // Start tracking this data frame for chunked delivery
                     self.pending = Some(PendingPayload { stream_id, remain: size as usize });
                 }

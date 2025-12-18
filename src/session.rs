@@ -114,18 +114,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
                     Frame::Session(event) => match event {
                         FrameSessionEvent::Ping(flags, code) => {
                             if flags.syn {
+                                log::debug!("[YamuxSession] got ping => answer");
                                 this.out_queue.push_back(Frame::Session(FrameSessionEvent::Ping(Flags::ack(), code)));
                             } else if flags.ack {
-                                log::info!("[YamuxSession] got pong");
+                                log::debug!("[YamuxSession] got pong");
                             }
                         }
                         FrameSessionEvent::GoAway(code) => {
-                            log::info!("[YamuxSession] close with code {code}");
+                            log::debug!("[YamuxSession] close with code {code}");
                             return Poll::Ready(None);
                         }
                     },
                     Frame::Stream(stream_id, event) => {
                         if let Some(head) = this.streams.get_mut(&stream_id) {
+                            log::debug!("[YamuxSession] got frame for stream {stream_id}");
                             if let Err(e) = head.on_input(event) {
                                 log::error!("[YamuxSession] stream {stream_id} error {e}");
                                 //TODO how to handle this?
@@ -144,6 +146,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
                             } else {
                                 log::warn!("[YamuxSession] incomming message of unknown stream {stream_id} without Flags SYN");
                             }
+                        } else {
+                            log::warn!("[YamuxSession] incomming message of unknown stream {stream_id}, event {event}");
                         }
                     }
                 },
@@ -166,6 +170,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
                 } else {
                     log::info!("[YamuxSession] stream {stream_id} closed => remove");
                     closed_stream.push(*stream_id);
+                    break;
                 }
             }
         }

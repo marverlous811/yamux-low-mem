@@ -200,6 +200,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
     }
 }
 
+impl<T: AsyncRead + AsyncWrite + Unpin> Drop for YamuxSession<T> {
+    fn drop(&mut self) {
+        log::info!("[YamuxSession] drop");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Session tests are deterministic `poll_*` state-machine checks, similar to the stream and

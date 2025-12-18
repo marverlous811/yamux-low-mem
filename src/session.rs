@@ -65,6 +65,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxSession<T> {
     pub fn open_stream(&mut self) -> YamuxStream {
         let stream_id = StreamID(self.next_stream_id);
         self.next_stream_id = self.next_stream_id.wrapping_add(2);
+        if self.next_stream_id == 0 {
+            self.next_stream_id = 2;
+        }
 
         let (head, stream) = open_stream(stream_id);
         self.streams.insert(stream_id, head);

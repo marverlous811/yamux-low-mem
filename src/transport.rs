@@ -122,6 +122,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxTransport<T> {
         while let Poll::Ready(event) = Pin::new(&mut this.stream).poll_read(cx, &mut buf) {
             match event {
                 Ok(len) => {
+                    if len == 0 {
+                        log::info!("[YamuxTransport] read 0 bytes => close");
+                        return Poll::Ready(None);
+                    }
                     log::debug!("[YamuxTransport] read {len} bytes");
                     this.reader.push_back(buf[..len].to_vec().into());
                     match this.reader.next_frame() {

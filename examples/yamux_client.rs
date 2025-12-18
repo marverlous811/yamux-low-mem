@@ -24,7 +24,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt::init();
 
     let transport = TcpStream::connect(args.yamux_server).await?;
     log::info!("connected to yamux server at {}", args.yamux_server);

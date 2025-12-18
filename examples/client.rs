@@ -28,7 +28,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt::init();
     let args = Args::parse();
 
     let transport = TcpStream::connect(args.yamux_server).await?;
@@ -36,13 +36,14 @@ async fn main() -> anyhow::Result<()> {
 
     let mut session = YamuxSession::client(transport.compat(), MAX_WRITE_BUFFER);
     while let Some(stream) = session.next().await {
+        let id = stream.stream_id();
         let target_addr = args.target_addr;
         tokio::spawn(async move {
-            log::info!("pipe opened");
+            log::info!("pipe {id} opened");
             if let Err(err) = pipe_yamux_to_target(stream, target_addr).await {
-                log::error!("pipe closed with error: {err:#}");
+                log::error!("pipe {id} closed with error: {err:#}");
             }
-            log::info!("pipe closed");
+            log::info!("pipe {id} closed");
         });
     }
 

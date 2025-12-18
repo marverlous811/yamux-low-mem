@@ -210,13 +210,7 @@ pub struct Header {
 impl Header {
     /// Constructs a new header for Yamux protocol version 0.
     pub fn new(type_: FrameType, flags: Flags, stream_id: StreamID, length: u32) -> Self {
-        Self {
-            version: 0,
-            type_,
-            flags,
-            stream_id,
-            length,
-        }
+        Self { version: 0, type_, flags, stream_id, length }
     }
 
     /// Attempts to parse a header.

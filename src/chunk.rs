@@ -169,11 +169,7 @@ impl ChunkView {
         }
         let start = self.start + range.start;
         let end = self.start + range.end;
-        Ok(ChunkView {
-            data: Arc::clone(&self.data),
-            start,
-            end,
-        })
+        Ok(ChunkView { data: Arc::clone(&self.data), start, end })
     }
 }
 
@@ -222,11 +218,7 @@ impl Eq for ChunkView {}
 
 impl From<Vec<u8>> for ChunkOwned {
     fn from(value: Vec<u8>) -> Self {
-        Self {
-            len: value.len(),
-            consumed: 0,
-            data: value,
-        }
+        Self { len: value.len(), consumed: 0, data: value }
     }
 }
 
@@ -287,10 +279,7 @@ pub struct ChainedChunkBufferWriter {
 impl ChainedChunkBufferWriter {
     /// Creates an empty chunk queue.
     pub fn new() -> Self {
-        Self {
-            queue: VecDeque::new(),
-            filled_len: 0,
-        }
+        Self { queue: VecDeque::new(), filled_len: 0 }
     }
 }
 

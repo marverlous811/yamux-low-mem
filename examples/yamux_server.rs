@@ -27,8 +27,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    tracing_subscriber::fmt::init();
 
-    let http_listener = TcpListener::bind(args.http_bind).await?;
     log::info!("http tcp listening on {}", args.http_bind);
 
     let yamux_listener = TcpListener::bind(args.yamux_bind).await?;
@@ -38,13 +38,18 @@ async fn main() -> anyhow::Result<()> {
         let (transport, peer_addr) = yamux_listener.accept().await?;
         log::info!("yamux client connected from {peer_addr}");
 
-        if let Err(err) = serve_client(transport, &http_listener).await {
-            log::error!("yamux client {peer_addr} disconnected: {err:#}");
-        }
+        tokio::spawn(async move {
+            log::info!("http tcp listening on {}", args.http_bind);
+
+            if let Err(err) = serve_client(transport, args.http_bind).await {
+                log::error!("yamux client {peer_addr} disconnected: {err:#}");
+            }
+        });
     }
 }
 
-async fn serve_client(transport: TcpStream, http_listener: &TcpListener) -> anyhow::Result<()> {
+async fn serve_client(transport: TcpStream, http_bind: SocketAddr) -> anyhow::Result<()> {
+    let http_listener = TcpListener::bind(http_bind).await?;
     let mut session = tokio_yamux::Session::new(transport, tokio_yamux::Config::default(), tokio_yamux::session::SessionType::Server);
 
     loop {
@@ -66,7 +71,10 @@ async fn serve_client(transport: TcpStream, http_listener: &TcpListener) -> anyh
                         // Client-initiated streams aren't used in this example; drop them.
                     }
                     Some(Err(err)) => return Err(err.into()),
-                    None => break,
+                    None => {
+                        log::warn!("yamux session closed");
+                        break
+                    },
                 }
             }
         }

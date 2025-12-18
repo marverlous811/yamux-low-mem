@@ -17,4 +17,4 @@ tokio-yamux = "0.3"
 test-log = "0.2"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = "0.3"

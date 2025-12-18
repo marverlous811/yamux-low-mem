@@ -66,8 +66,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxSession<T> {
         let stream_id = StreamID(self.next_stream_id);
         self.next_stream_id = self.next_stream_id.wrapping_add(2);
 
-        let (head, stream) = open_stream();
+        let (head, stream) = open_stream(stream_id);
         self.streams.insert(stream_id, head);
+        log::info!("[YamuxSession] opened stream {stream_id}, total streams: {}", self.streams.len());
         stream
     }
 
@@ -135,16 +136,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
                         } else if let Some(flags) = event.flags() {
                             if flags.syn {
                                 log::info!("[YamuxSession] on incoming stream: {stream_id}");
-                                let (mut head, stream) = accept_stream();
+                                let (mut head, stream) = accept_stream(stream_id);
                                 if let Err(e) = head.on_input(event) {
                                     log::error!("[YamuxSession] stream {stream_id} error {e}");
                                     //TODO how to handle this?
                                 }
                                 this.streams.insert(stream_id, head);
+                                log::info!("[YamuxSession] accepted stream {stream_id}, total streams: {}", this.streams.len());
 
                                 return Poll::Ready(Some(stream));
                             } else {
-                                log::warn!("[YamuxSession] incomming message of unknown stream {stream_id} without Flags SYN");
+                                log::warn!("[YamuxSession] incomming message of unknown stream {stream_id}, event {event}");
                             }
                         } else {
                             log::warn!("[YamuxSession] incomming message of unknown stream {stream_id}, event {event}");
@@ -176,6 +178,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
         }
         for stream_id in closed_stream {
             this.streams.remove(&stream_id);
+            log::info!("[YamuxSession] removed stream {stream_id} => total streams: {}", this.streams.len());
         }
 
         // second try to send

@@ -3,31 +3,20 @@
 //! The chunk types intentionally work on fixed-size blocks so we can reuse
 //! allocations when slicing data into views for parsing and encoding.
 
-use std::{collections::VecDeque, ops::Range, sync::Arc};
+use std::{
+    collections::VecDeque,
+    ops::{Deref, Range},
+    sync::Arc,
+};
 
 use derive_more::Display;
 use thiserror::Error;
 
 /// Number of bytes a [`ChunkOwned`] can store.
-pub const CHUNK_CAPACITY: usize = 4090;
+pub const DEFAULT_CHUNK_CAPACITY: usize = 4090;
 
 /// Trait for sequentially consuming bytes from chained chunks without copying.
 pub trait ChunkBufferReader {
-    /// Returns how many bytes are buffered so far.
-    fn len(&self) -> usize;
-
-    /// Pulls the next byte if available.
-    fn next_u8(&mut self) -> Option<u8>;
-    /// Pulls two bytes in network order.
-    fn next_u16(&mut self) -> Option<u16>;
-    /// Pulls a `u32` encoded as a 4-byte network-order integer.
-    fn next_u32(&mut self) -> Option<u32>;
-    /// Returns a view limited by `max_len`.
-    fn next_chunk(&mut self, max_len: usize) -> Option<ChunkView>;
-}
-
-/// Writer for populating chained chunks.
-pub trait ChunkBufferWriter {
     /// Returns how many bytes are buffered so far.
     fn len(&self) -> usize;
 
@@ -35,24 +24,89 @@ pub trait ChunkBufferWriter {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Pulls the next byte if available.
+    fn next_u8(&mut self) -> Option<u8>;
+
+    /// Pulls two bytes in network order.
+    fn next_u16(&mut self) -> Option<u16> {
+        if self.len() < 2 {
+            return None;
+        }
+        let v1 = self.next_u8().expect("chunk is empty");
+        let v2 = self.next_u8().expect("chunk is empty");
+        let value = u16::from_be_bytes([v1, v2]);
+        Some(value)
+    }
+
+    /// Pulls a `u32` encoded as a 4-byte network-order integer.
+    fn next_u32(&mut self) -> Option<u32> {
+        if self.len() < 4 {
+            return None;
+        }
+        let v1 = self.next_u8().expect("chunk is empty");
+        let v2 = self.next_u8().expect("chunk is empty");
+        let v3 = self.next_u8().expect("chunk is empty");
+        let v4 = self.next_u8().expect("chunk is empty");
+        let value = u32::from_be_bytes([v1, v2, v3, v4]);
+        Some(value)
+    }
+
+    /// Returns a view limited by `max_len`.
+    fn next_chunk(&mut self, max_len: usize) -> Option<ChunkView>;
+}
+
+/// Writer for populating chained chunks.
+pub trait ChunkBufferWriter {
+    /// Returns how many bytes are buffered so far.
+    fn filled_len(&self) -> usize;
+
+    /// Return available size, which is the number of bytes that can be written
+    fn available_len(&self) -> usize;
+
     /// Appends a single byte.
     fn write_u8(&mut self, byte: u8);
+
     /// Appends two bytes in network order.
-    fn write_u16(&mut self, value: u16);
+    fn write_u16(&mut self, value: u16) {
+        self.write_u8((value >> 8) as u8);
+        self.write_u8((value & 0xFF) as u8);
+    }
+
     /// Appends a `u32` encoded as a 4-byte network-order integer.
-    fn write_u32(&mut self, value: u32);
-    /// Appends the contents of an existing [`ChunkView`].
-    fn write_chunk(&mut self, chunk: &ChunkView);
+    fn write_u32(&mut self, value: u32) {
+        self.write_u8((value >> 24) as u8);
+        self.write_u8((value >> 16) as u8);
+        self.write_u8((value >> 8) as u8);
+        self.write_u8((value & 0xFF) as u8);
+    }
+
+    /// Appends the contents of a slice.
+    fn write_slice(&mut self, chunk: &[u8]);
 }
 
 pub trait ChunkBufferSource {
+    /// Returns the front slice of the queue.
+    fn front_slice(&self) -> Option<&[u8]>;
+
     /// Pops the next chunk from the front of the queue.
     fn pop_front(&mut self) -> Option<ChunkView>;
+
+    /// Consume some bytes from front
+    fn consume_front(&mut self, len: usize);
 }
 
 pub trait ChunkBufferSink {
     /// Pushes a new chunk to the front of the queue.
     fn push_back(&mut self, chunk: ChunkView);
+}
+
+/// Errors emitted by chunk helpers.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ChunkError {
+    /// The provided input is larger than [`CHUNK_CAPACITY`].
+    #[error("overflow {attempted}")]
+    Overflow { attempted: usize },
 }
 
 /// Immutable window into a [`ChunkOwned`].
@@ -69,20 +123,7 @@ pub struct ChunkView {
 pub struct ChunkOwned {
     data: Vec<u8>,
     len: usize,
-}
-
-/// Errors emitted by chunk helpers.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum ChunkError {
-    /// The provided input is larger than [`CHUNK_CAPACITY`].
-    #[error("overflow {attempted}")]
-    Overflow { attempted: usize },
-}
-
-impl From<Vec<u8>> for ChunkOwned {
-    fn from(value: Vec<u8>) -> Self {
-        Self { len: value.len(), data: value }
-    }
+    consumed: usize,
 }
 
 impl From<ChunkOwned> for ChunkView {
@@ -99,16 +140,6 @@ impl From<Vec<u8>> for ChunkView {
 }
 
 impl ChunkView {
-    /// Returns the number of visible bytes.
-    pub fn len(&self) -> usize {
-        self.end - self.start
-    }
-
-    /// Returns true when no data is visible.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// Borrows a narrower view of this chunk.
     ///
     /// # Panics
@@ -126,98 +157,102 @@ impl ChunkView {
             end,
         })
     }
-
-    /// Exposes the visible bytes as a slice.
-    pub fn as_slice(&self) -> &[u8] {
-        &self.data.data[self.start..self.end]
-    }
 }
 
-impl ChunkOwned {
-    /// Creates an empty chunk.
-    pub fn new() -> Self {
-        Self {
-            data: Vec::with_capacity(CHUNK_CAPACITY),
-            len: 0,
-        }
-    }
-
-    /// Returns true when the chunk holds no bytes.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Returns the number of bytes stored in the chunk.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Returns how many bytes can still be written.
-    pub fn remaining(&self) -> usize {
-        CHUNK_CAPACITY - self.len
-    }
-
-    /// Appends as many bytes as possible from `bytes`.
-    ///
-    /// Returns the number of bytes written.
-    pub fn extend_from_slice(&mut self, bytes: &[u8]) -> usize {
-        let write_len = bytes.len().min(self.remaining());
-        self.data.extend_from_slice(&bytes[..write_len]);
-        self.len += write_len;
-        write_len
-    }
-
-    /// Appends a single byte if capacity allows.
-    pub fn push(&mut self, byte: u8) -> bool {
-        if self.len == CHUNK_CAPACITY {
-            return false;
-        }
-        self.data.push(byte);
-        self.len += 1;
-        true
-    }
-
-    /// Exposes the written bytes as a slice.
-    pub fn as_slice(&self) -> &[u8] {
-        &self.data[..self.len]
-    }
-}
-
-impl Default for ChunkOwned {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ChunkBufferWriter for Vec<u8> {
+impl ChunkBufferReader for ChunkView {
+    /// Returns the number of visible bytes.
     fn len(&self) -> usize {
-        Vec::len(self)
+        self.end - self.start
     }
 
-    fn write_u8(&mut self, byte: u8) {
-        self.push(byte);
+    fn next_u8(&mut self) -> Option<u8> {
+        if self.len() == 0 {
+            return None;
+        }
+        let value = self.data.data[self.start];
+        self.start += 1;
+        Some(value)
     }
 
-    fn write_u16(&mut self, value: u16) {
-        self.extend_from_slice(&value.to_be_bytes());
-    }
+    fn next_chunk(&mut self, max_len: usize) -> Option<ChunkView> {
+        if self.len() == 0 {
+            return None;
+        }
 
-    fn write_u32(&mut self, value: u32) {
-        self.extend_from_slice(&value.to_be_bytes());
+        let chunk_len = max_len.min(self.len());
+        let chunk = self.view(0..chunk_len).expect("should ok with above min");
+        self.start += chunk_len;
+        Some(chunk)
     }
+}
 
-    fn write_chunk(&mut self, chunk: &ChunkView) {
-        self.extend_from_slice(chunk.as_slice());
+impl Deref for ChunkView {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data.data[self.start..self.end]
     }
 }
 
 impl PartialEq for ChunkView {
     fn eq(&self, other: &Self) -> bool {
-        self.as_slice() == other.as_slice()
+        self.deref() == other.deref()
     }
 }
 
 impl Eq for ChunkView {}
+
+impl From<Vec<u8>> for ChunkOwned {
+    fn from(value: Vec<u8>) -> Self {
+        Self {
+            len: value.len(),
+            consumed: 0,
+            data: value,
+        }
+    }
+}
+
+impl Default for ChunkOwned {
+    fn default() -> Self {
+        Self {
+            data: vec![0; DEFAULT_CHUNK_CAPACITY],
+            len: 0,
+            consumed: 0,
+        }
+    }
+}
+
+impl ChunkOwned {
+    /// Return filled slice
+    pub fn filled_slice(&self) -> &[u8] {
+        &self.data[self.consumed..self.len]
+    }
+
+    /// Consume some bytes from front
+    pub fn consume_front(&mut self, len: usize) {
+        self.consumed += len;
+    }
+}
+
+impl ChunkBufferWriter for ChunkOwned {
+    fn filled_len(&self) -> usize {
+        self.len - self.consumed
+    }
+
+    fn available_len(&self) -> usize {
+        self.data.capacity() - self.len
+    }
+
+    fn write_u8(&mut self, byte: u8) {
+        self.data[self.len] = byte;
+        self.len += 1;
+    }
+
+    fn write_slice(&mut self, chunk: &[u8]) {
+        self.data[self.len..self.len + chunk.len()].copy_from_slice(chunk);
+        self.len += chunk.len();
+    }
+}
 
 /// Writer that appends encoded bytes into chained [`ChunkOwned`] blocks.
 ///
@@ -225,8 +260,7 @@ impl Eq for ChunkView {}
 /// without inlining capacity checks.
 pub struct ChainedChunkBufferWriter {
     queue: VecDeque<ChunkOwned>,
-    len: usize,
-    front_offset: usize,
+    filled_len: usize,
 }
 
 impl ChainedChunkBufferWriter {
@@ -234,44 +268,7 @@ impl ChainedChunkBufferWriter {
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
-            len: 0,
-            front_offset: 0,
-        }
-    }
-
-    /// Borrows the next available bytes for flushing to an I/O sink.
-    pub fn front_slice(&self) -> Option<&[u8]> {
-        let front = self.queue.front()?;
-        Some(&front.as_slice()[self.front_offset..])
-    }
-
-    /// Advances the current chunk by `len` bytes, dropping it when fully consumed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `len` exceeds the remaining bytes in the front chunk.
-    pub fn consume_front(&mut self, len: usize) {
-        if let Some(front) = self.queue.front() {
-            assert!(self.front_offset + len <= front.len(), "consume beyond chunk length");
-            self.front_offset += len;
-            if self.front_offset == front.len() {
-                self.queue.pop_front();
-                self.front_offset = 0;
-            }
-        } else {
-            assert_eq!(len, 0, "consume on empty queue");
-        }
-    }
-
-    /// Exposes buffered data as a contiguous vector (primarily for tests).
-    #[cfg(test)]
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.queue.into_iter().flat_map(|c| c.as_slice().to_vec()).collect()
-    }
-
-    fn ensure_tail(&mut self) {
-        if !matches!(self.queue.back(), Some(chunk) if chunk.remaining() > 0) {
-            self.queue.push_back(ChunkOwned::new());
+            filled_len: 0,
         }
     }
 }
@@ -283,49 +280,73 @@ impl Default for ChainedChunkBufferWriter {
 }
 
 impl ChunkBufferSource for ChainedChunkBufferWriter {
+    fn front_slice(&self) -> Option<&[u8]> {
+        self.queue.front().map(|c| c.filled_slice())
+    }
+
     fn pop_front(&mut self) -> Option<ChunkView> {
         self.queue.pop_front().map(|c| {
-            self.len -= c.len();
+            self.filled_len -= c.filled_len();
             c.into()
         })
+    }
+
+    fn consume_front(&mut self, len: usize) {
+        //TODO check len and return error
+        self.queue.front_mut().map(|c| {
+            c.consume_front(len);
+            self.filled_len -= len;
+        });
     }
 }
 
 impl ChunkBufferWriter for ChainedChunkBufferWriter {
-    fn len(&self) -> usize {
-        self.len
+    fn filled_len(&self) -> usize {
+        self.filled_len
+    }
+
+    fn available_len(&self) -> usize {
+        if let Some(last) = self.queue.back() {
+            last.available_len()
+        } else {
+            0
+        }
     }
 
     fn write_u8(&mut self, byte: u8) {
-        self.len += 1;
-        self.ensure_tail();
-        let tail = self.queue.back_mut().expect("tail exists");
-        if tail.push(byte) {
+        if let Some(last) = self.queue.back_mut()
+            && last.available_len() >= 1
+        {
+            last.write_u8(byte);
+        } else {
+            let mut chunk = ChunkOwned::default();
+            chunk.write_u8(byte);
+            self.queue.push_back(chunk);
+        }
+    }
+
+    fn write_slice(&mut self, data: &[u8]) {
+        if data.is_empty() {
             return;
         }
-        self.ensure_tail();
-        self.queue.back_mut().expect("tail exists").push(byte);
-    }
-
-    fn write_u16(&mut self, value: u16) {
-        for b in value.to_be_bytes() {
-            self.write_u8(b);
+        if self.queue.is_empty() {
+            self.queue.push_back(ChunkOwned::default());
         }
-    }
-
-    fn write_u32(&mut self, value: u32) {
-        for b in value.to_be_bytes() {
-            self.write_u8(b);
-        }
-    }
-
-    fn write_chunk(&mut self, chunk: &ChunkView) {
         let mut offset = 0;
-        while offset < chunk.len() {
-            self.ensure_tail();
-            let tail = self.queue.back_mut().expect("tail exists");
-            let wrote = tail.extend_from_slice(&chunk.as_slice()[offset..]);
-            offset += wrote;
+        while offset < data.len() {
+            if let Some(last) = self.queue.back_mut()
+                && last.available_len() >= 1
+            {
+                let write_len = last.available_len().min(data.len() - offset);
+                last.write_slice(&data[offset..offset + write_len]);
+                offset += write_len;
+            } else {
+                let mut chunk = ChunkOwned::default();
+                let write_len = chunk.available_len().min(data.len() - offset);
+                chunk.write_slice(&data[offset..offset + write_len]);
+                offset += write_len;
+                self.queue.push_back(chunk);
+            }
         }
     }
 }
@@ -333,17 +354,12 @@ impl ChunkBufferWriter for ChainedChunkBufferWriter {
 /// Reader that walks across chained [`ChunkView`] blocks.
 pub struct ChainedChunkBufferReader {
     chunks: VecDeque<ChunkView>,
-    front_offset: usize,
     len: usize,
 }
 
 impl ChainedChunkBufferReader {
     pub fn new() -> Self {
-        Self {
-            chunks: VecDeque::new(),
-            front_offset: 0,
-            len: 0,
-        }
+        Self { chunks: VecDeque::new(), len: 0 }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -351,22 +367,11 @@ impl ChainedChunkBufferReader {
     }
 }
 
-impl From<Vec<u8>> for ChainedChunkBufferReader {
-    fn from(value: Vec<u8>) -> Self {
-        Self {
-            len: value.len(),
-            chunks: VecDeque::from_iter([ChunkOwned::from(value).into()]),
-            front_offset: 0,
-        }
-    }
-}
-
 impl From<ChainedChunkBufferWriter> for ChainedChunkBufferReader {
     fn from(value: ChainedChunkBufferWriter) -> Self {
         Self {
-            len: value.len(),
+            len: value.filled_len(),
             chunks: VecDeque::from_iter(value.queue.into_iter().map(|c| c.into())),
-            front_offset: 0,
         }
     }
 }
@@ -390,53 +395,23 @@ impl ChunkBufferReader for ChainedChunkBufferReader {
     }
 
     fn next_u8(&mut self) -> Option<u8> {
-        let front = self.chunks.front()?;
-        let value = front.as_slice()[self.front_offset];
-        self.front_offset += 1;
+        let front = self.chunks.front_mut()?;
+        let out = front.next_u8().expect("front chunk must have at least one bytes");
         self.len -= 1;
-
-        if self.front_offset == front.len() {
+        if front.is_empty() {
             self.chunks.pop_front();
-            self.front_offset = 0;
         }
-
-        Some(value)
-    }
-
-    fn next_u16(&mut self) -> Option<u16> {
-        if self.len() < 2 {
-            return None;
-        }
-        let hi = self.next_u8()? as u16;
-        let lo = self.next_u8()? as u16;
-        Some((hi << 8) | lo)
-    }
-
-    fn next_u32(&mut self) -> Option<u32> {
-        if self.len() < 4 {
-            return None;
-        }
-        let mut buf = [0u8; 4];
-        for byte in buf.iter_mut() {
-            *byte = self.next_u8()?;
-        }
-        Some(u32::from_be_bytes(buf))
+        Some(out)
     }
 
     fn next_chunk(&mut self, max_len: usize) -> Option<ChunkView> {
-        let front = self.chunks.front()?;
-        if front.len() - self.front_offset > max_len {
-            let out = front.view(self.front_offset..self.front_offset + max_len).expect("should got child view");
-            self.front_offset += max_len;
-            self.len -= max_len;
-            Some(out)
-        } else {
-            let out: ChunkView = front.view(self.front_offset..front.len()).expect("should got child view");
+        let front = self.chunks.front_mut()?;
+        let out = front.next_chunk(max_len).expect("front chunk must have at least one bytes");
+        self.len -= out.len();
+        if front.is_empty() {
             self.chunks.pop_front();
-            self.front_offset = 0;
-            self.len -= out.len();
-            Some(out)
         }
+        Some(out)
     }
 }
 

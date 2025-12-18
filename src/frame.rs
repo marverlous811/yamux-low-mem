@@ -33,7 +33,7 @@ impl<R: ChunkBufferReader + ChunkBufferSink> FrameReader<R> {
         Self { buffer, pending: None }
     }
 
-    /// Pushes a new chunk to the front of the queue.
+    /// Pushes a new chunk to the back of the queue.
     pub fn push_back(&mut self, chunk: ChunkView) {
         self.buffer.push_back(chunk);
     }
@@ -218,12 +218,47 @@ impl Frame {
                     Header::new(FrameType::Data, *flags, *stream_id, *size).write(buffer);
                 }
                 FrameStreamEvent::DataChunk(chunk) => {
-                    buffer.write_chunk(chunk);
+                    if !chunk.is_empty() {
+                        buffer.write_slice(&chunk);
+                    }
                 }
                 FrameStreamEvent::WindowUpdate(flags, delta) => {
                     Header::new(FrameType::WindowUpdate, *flags, *stream_id, *delta).write(buffer);
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn write_frame_then_parse() {
+        //TODO
+    }
+
+    #[test]
+    fn read_from_frame_bytes() {
+        //TODO
+    }
+
+    #[test]
+    fn pipe_writer_to_reader_frames() {
+        //TODO
+    }
+
+    #[test]
+    fn small_data_frame() {
+        //TODO
+    }
+
+    #[test]
+    fn large_data_frame() {
+        //TODO
+    }
+
+    #[test]
+    fn reader_wrong_frame_type() {
+        //TODO
     }
 }

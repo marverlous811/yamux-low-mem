@@ -202,3 +202,26 @@ impl Header {
         buffer.write_u32(self.length);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn stream_build_test() {
+        //TODO
+    }
+
+    #[test]
+    fn flags_build_test() {
+        //TODO
+    }
+
+    #[test]
+    fn frame_type_vs_u8_test() {
+        //TODO
+    }
+
+    #[test]
+    fn header_build_parse_test() {
+        //TODO
+    }
+}

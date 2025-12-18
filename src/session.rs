@@ -168,3 +168,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
         Poll::Pending
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn should_able_to_open_stream_and_receive_stream() {
+        //TODO: create 2 session, open stream from client, accept stream from server
+    }
+
+    #[test]
+    fn should_able_to_close_and_wait_sent_out() {
+        //TODO: create 2 session, close manual, wait sent out
+    }
+}

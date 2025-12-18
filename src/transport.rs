@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 
 use futures::{AsyncRead, AsyncWrite, Sink, Stream};
 
-use crate::chunk::{ChainedChunkBufferReader, ChainedChunkBufferWriter, ChunkBufferWriter};
+use crate::chunk::{ChainedChunkBufferReader, ChainedChunkBufferWriter, ChunkBufferSource, ChunkBufferWriter};
 use crate::frame::{Frame, FrameReader, FrameWriter};
 
 /// Adapts an `AsyncRead`/`AsyncWrite` stream into Yamux frames using chunked buffers.
@@ -53,8 +53,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame> for YamuxTransport<T> {
         match this.poll_write(cx)? {
             Poll::Ready(_) => Poll::Ready(Ok(())),
             Poll::Pending => {
-                // if we have buffer more than max_writer_buffer, we need to wait for the next poll
-                if this.writer.buffer_mut().len() >= this.max_writer_buffer {
+                // if we have buffer more than max_writer_buffer, we need to wait
+                if this.writer.buffer_mut().filled_len() >= this.max_writer_buffer {
                     return Poll::Pending;
                 } else {
                     return Poll::Ready(Ok(()));
@@ -106,5 +106,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxTransport<T> {
             }
         }
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pipe_2_streams() {
+        //TODO
     }
 }

@@ -10,7 +10,7 @@ use futures::{
 };
 
 use crate::{
-    chunk::{CHUNK_CAPACITY, ChunkView},
+    chunk::{ChunkView, DEFAULT_CHUNK_CAPACITY},
     frame::FrameStreamEvent,
     packet::{Flags, FlagsBuilder},
 };
@@ -145,7 +145,7 @@ impl YamuxStreamHead {
     fn mark_received_bytes(&mut self, received: usize) {
         self.window.recv += received;
         // auto send WindowUpdate when we received INITIAL_WINDOW
-        if self.window.recv + CHUNK_CAPACITY >= INITIAL_WINDOW as usize / 2 {
+        if self.window.recv + DEFAULT_CHUNK_CAPACITY >= INITIAL_WINDOW as usize / 2 {
             self.outs.push_back(FrameStreamEvent::WindowUpdate(
                 FlagsBuilder::default().ack(true).build().expect("should build ok"),
                 self.window.recv as u32,
@@ -166,10 +166,15 @@ impl Stream for YamuxStreamHead {
             return Poll::Ready(None);
         }
 
+        // we need to wait for remote to open (wait ack)
+        if !this.state.remote {
+            return Poll::Pending;
+        }
+
         // we need to wait for more data to be available
         // this hard limit is for simpler implementation. I am avoid complex flow-control window management
         // other option is try to send as mush as possible with condition this.window.send == 0, but it lead to complex logic
-        if this.window.send < CHUNK_CAPACITY {
+        if this.window.send < DEFAULT_CHUNK_CAPACITY {
             return Poll::Pending;
         }
 
@@ -217,7 +222,7 @@ impl AsyncRead for YamuxStream {
 
         if let Some((chunk, offset)) = &mut this.recv_chunk {
             let read_len = (chunk.len() - *offset).min(buf.len());
-            buf[..read_len].copy_from_slice(&chunk.as_slice()[*offset..*offset + read_len]);
+            buf[..read_len].copy_from_slice(&chunk[*offset..*offset + read_len]);
             *offset += read_len;
             if *offset == chunk.len() {
                 this.recv_chunk = None;
@@ -237,7 +242,7 @@ impl AsyncWrite for YamuxStream {
             if let Err(e) = event {
                 return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
             }
-            let send_len = buf.len().min(CHUNK_CAPACITY);
+            let send_len = buf.len().min(DEFAULT_CHUNK_CAPACITY);
             if let Err(e) = this.tx.start_send(buf[..send_len].to_vec().into()) {
                 return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
             }
@@ -270,4 +275,42 @@ pub(crate) fn accept_stream() -> (YamuxStreamHead, YamuxStream) {
     let (tx, rx) = channel(1);
     let (tx2, rx2) = unbounded();
     (YamuxStreamHead::accept(tx2, rx), YamuxStream { tx, rx: rx2, recv_chunk: None })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn open_stream_should_wait_remote_open() {
+        //TODO
+    }
+
+    #[test]
+    fn accept_stream_should_able_to_send_data() {
+        //TODO
+    }
+
+    #[test]
+    fn wrong_data_chunk_size_should_return_error() {
+        //TODO
+    }
+
+    #[test]
+    fn wrong_data_chunk_state_should_return_error() {
+        //TODO
+    }
+
+    #[test]
+    fn should_pending_after_exceed_window() {
+        //TODO
+    }
+
+    #[test]
+    fn should_send_window_update_after_received_large_data() {
+        //TODO
+    }
+
+    #[test]
+    fn should_able_to_send_after_received_window_update() {
+        //TODO
+    }
 }

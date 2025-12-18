@@ -5,7 +5,6 @@
 
 use derive_more::Display;
 use thiserror::Error;
-use typesafe_builder::*;
 
 use crate::chunk::{ChunkBufferReader, ChunkBufferWriter};
 
@@ -100,19 +99,15 @@ impl StreamID {
 // === Flags ===
 
 /// Yamux control flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Builder)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
 #[display("Flags(syn: {syn}, ack: {ack}, fin: {fin}, rst: {rst})")]
 pub struct Flags {
-    #[builder(default = "false")]
     /// SYN (open stream).
     pub syn: bool,
-    #[builder(default = "false")]
     /// ACK (accept stream).
     pub ack: bool,
-    #[builder(default = "false")]
     /// FIN (half-close).
     pub fin: bool,
-    #[builder(default = "false")]
     /// RST (hard reset).
     pub rst: bool,
 }
@@ -126,6 +121,26 @@ impl Flags {
     /// Creates an empty set of flags.
     pub fn empty() -> Self {
         Self::new(false, false, false, false)
+    }
+
+    /// Create syn
+    pub fn syn() -> Self {
+        Self::new(true, false, false, false)
+    }
+
+    /// Create ack
+    pub fn ack() -> Self {
+        Self::new(false, true, false, false)
+    }
+
+    /// Create fin
+    pub fn fin() -> Self {
+        Self::new(false, false, true, false)
+    }
+
+    /// Create rst
+    pub fn rst() -> Self {
+        Self::new(false, false, false, true)
     }
 
     /// Converts the bitfield into flags.
@@ -258,13 +273,17 @@ mod tests {
 
     #[test]
     fn flags_build_test() {
-        let flags = FlagsBuilder::new().with_syn(true).with_ack(true).with_fin(true).with_rst(true).build();
-        assert_eq!(flags.bits() & 0xF, 0xF);
+        let flags = Flags::syn();
+        assert_eq!(flags.bits() & 0xF, 0x1);
 
-        for bits in 0u16..16u16 {
-            let decoded = Flags::from_bits(bits);
-            assert_eq!(decoded.bits(), bits);
-        }
+        let flags = Flags::ack();
+        assert_eq!(flags.bits() & 0xF, 0x2);
+
+        let flags = Flags::fin();
+        assert_eq!(flags.bits() & 0xF, 0x4);
+
+        let flags = Flags::rst();
+        assert_eq!(flags.bits() & 0xF, 0x8);
     }
 
     #[test]
@@ -279,7 +298,7 @@ mod tests {
 
     #[test]
     fn header_build_parse_test() {
-        let header = Header::new(FrameType::Data, FlagsBuilder::new().with_syn(true).build(), StreamID(3), 42);
+        let header = Header::new(FrameType::Data, Flags::syn(), StreamID(3), 42);
         assert_eq!(header.version, 0);
 
         let mut out = ChunkOwned::default();

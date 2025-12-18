@@ -266,11 +266,11 @@ impl Frame {
 mod tests {
     use super::*;
     use crate::chunk::{ChainedChunkBufferReader, ChainedChunkBufferWriter};
-    use crate::packet::{FlagsBuilder, StreamID};
+    use crate::packet::StreamID;
 
     #[test]
     fn write_frame_then_parse() {
-        let frame = Frame::Session(FrameSessionEvent::Ping(FlagsBuilder::new().with_syn(true).build(), 123));
+        let frame = Frame::Session(FrameSessionEvent::Ping(Flags::syn(), 123));
 
         let mut buf = ChainedChunkBufferWriter::new();
         frame.write(&mut buf);
@@ -289,10 +289,7 @@ mod tests {
             0u8, 0u8, 0u8, 99u8,
         ];
         let mut view: crate::chunk::ChunkView = bytes.to_vec().into();
-        assert_eq!(
-            Frame::read(&mut view),
-            Ok(Some(Frame::Stream(StreamID(7), FrameStreamEvent::WindowUpdate(FlagsBuilder::new().with_fin(true).build(), 99))))
-        );
+        assert_eq!(Frame::read(&mut view), Ok(Some(Frame::Stream(StreamID(7), FrameStreamEvent::WindowUpdate(Flags::fin(), 99)))));
         assert_eq!(view.len(), 0);
     }
 
@@ -395,7 +392,7 @@ mod tests {
 
         writer.write(Frame::Stream(stream_id, FrameStreamEvent::Data(Flags::empty(), 3))).expect("should write");
 
-        let err = writer.write(Frame::Session(FrameSessionEvent::Ping(FlagsBuilder::new().with_syn(true).build(), 0))).unwrap_err();
+        let err = writer.write(Frame::Session(FrameSessionEvent::Ping(Flags::syn(), 0))).unwrap_err();
         assert_eq!(err, FrameWriterError::UnexpectedFrameType);
 
         // Reset writer state.

@@ -17,17 +17,19 @@ use futures::{
     AsyncRead, AsyncWrite, SinkExt, Stream, StreamExt,
     channel::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded},
 };
+use thiserror::Error;
 
 use crate::{
     chunk::{ChunkView, DEFAULT_CHUNK_CAPACITY},
     frame::FrameStreamEvent,
-    packet::{Flags, FlagsBuilder},
+    packet::Flags,
 };
 
 // === Constants ===
 
 /// Initial per-stream flow-control window in bytes.
 pub const INITIAL_WINDOW: u32 = 256 * 1024;
+pub const DEFAULT_WINDOW_UPDATE_THRESHOLD: u32 = INITIAL_WINDOW / 2;
 
 // === Internal state ===
 
@@ -54,6 +56,16 @@ impl State {
 
 // === Stream head (session-driven) ===
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum YamuxStreamHeadError {
+    #[error("invalid frame type")]
+    InvalidFrameType,
+    #[error("invalid data chunk size")]
+    InvalidDataChunkSize,
+    #[error("internal channel error")]
+    InternalChannelError,
+}
+
 /// Internal state machine that turns stream I/O into [`FrameStreamEvent`] values.
 ///
 /// The session drives this type by:
@@ -71,14 +83,14 @@ pub struct YamuxStreamHead {
 impl YamuxStreamHead {
     /// Creates a new outbound stream head (initiates with `SYN`).
     fn open(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
-        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::new().with_syn(true).build(), INITIAL_WINDOW);
+        let init_pkt = FrameStreamEvent::WindowUpdate(Flags::syn(), INITIAL_WINDOW);
         Self {
             tx,
             rx,
             state: State { local: true, remote: false },
             window: Window {
                 send: INITIAL_WINDOW as usize,
-                recv: INITIAL_WINDOW as usize,
+                recv: 0,
             },
             outs: VecDeque::from_iter([init_pkt]),
             recv_state: None,
@@ -87,14 +99,14 @@ impl YamuxStreamHead {
 
     /// Creates a new inbound stream head (acknowledges with `ACK`).
     fn accept(tx: UnboundedSender<ChunkView>, rx: Receiver<ChunkView>) -> Self {
-        let init_pkt = FrameStreamEvent::WindowUpdate(FlagsBuilder::new().with_ack(true).build(), INITIAL_WINDOW);
+        let init_pkt = FrameStreamEvent::WindowUpdate(Flags::ack(), INITIAL_WINDOW);
         Self {
             tx,
             rx,
             state: State { local: true, remote: true },
             window: Window {
                 send: INITIAL_WINDOW as usize,
-                recv: INITIAL_WINDOW as usize,
+                recv: 0,
             },
             outs: VecDeque::from_iter([init_pkt]),
             recv_state: None,
@@ -107,11 +119,11 @@ impl YamuxStreamHead {
     ///
     /// Returns an I/O error with kind [`std::io::ErrorKind::InvalidData`] when the inbound
     /// sequence violates the expected Yamux data header/chunk ordering.
-    pub fn on_input(&mut self, event: FrameStreamEvent) -> std::io::Result<()> {
+    pub fn on_input(&mut self, event: FrameStreamEvent) -> Result<(), YamuxStreamHeadError> {
         match event {
             FrameStreamEvent::Data(flags, size) => {
                 if self.recv_state.is_some() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "received data while already receiving data"));
+                    return Err(YamuxStreamHeadError::InvalidFrameType);
                 }
 
                 self.handle_flag(flags);
@@ -122,12 +134,14 @@ impl YamuxStreamHead {
             FrameStreamEvent::DataChunk(chunk_view) => {
                 if let Some(recv_state) = &mut self.recv_state {
                     if *recv_state < chunk_view.len() {
-                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "received data chunk size is larger than expected"));
+                        return Err(YamuxStreamHeadError::InvalidDataChunkSize);
                     }
 
                     *recv_state -= chunk_view.len();
                     let received_len = chunk_view.len();
-                    self.tx.unbounded_send(chunk_view).expect("should send ok");
+                    if self.tx.unbounded_send(chunk_view).is_err() {
+                        return Err(YamuxStreamHeadError::InternalChannelError);
+                    }
 
                     if *recv_state == 0 {
                         self.recv_state = None;
@@ -136,7 +150,7 @@ impl YamuxStreamHead {
                     self.mark_received_bytes(received_len);
                     Ok(())
                 } else {
-                    Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "received data chunk while not receiving data"))
+                    Err(YamuxStreamHeadError::InvalidFrameType)
                 }
             }
             FrameStreamEvent::WindowUpdate(flags, delta) => {
@@ -164,7 +178,7 @@ impl YamuxStreamHead {
         if flag.fin {
             log::warn!("[YamuxStreamHead] received fin => remote closed, send empty chunk");
             self.state.remote = false;
-            self.tx.unbounded_send(vec![].into()).expect("should send ok");
+            let _ = self.tx.unbounded_send(vec![].into());
         }
     }
 
@@ -172,8 +186,8 @@ impl YamuxStreamHead {
     fn mark_received_bytes(&mut self, received: usize) {
         self.window.recv += received;
         // auto send WindowUpdate when we received INITIAL_WINDOW
-        if self.window.recv + DEFAULT_CHUNK_CAPACITY >= INITIAL_WINDOW as usize / 2 {
-            self.outs.push_back(FrameStreamEvent::WindowUpdate(FlagsBuilder::new().with_ack(true).build(), self.window.recv as u32));
+        if self.window.recv + DEFAULT_CHUNK_CAPACITY >= DEFAULT_WINDOW_UPDATE_THRESHOLD as usize {
+            self.outs.push_back(FrameStreamEvent::WindowUpdate(Flags::ack(), self.window.recv as u32));
             self.window.recv = 0;
         }
     }
@@ -185,32 +199,41 @@ impl Stream for YamuxStreamHead {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
+        if let Some(out) = this.outs.pop_front() {
+            return Poll::Ready(Some(out));
+        }
+
         if this.state.is_closed() {
-            //both local and remote are closed => stream is closed
+            // both local and remote are closed => stream is closed
             return Poll::Ready(None);
         }
 
-        // we need to wait for remote to open (wait ack)
+        // We need to wait for remote to open (wait ack) before sending application data,
+        // but we may still have control frames buffered in `outs` (e.g. initial SYN/ACK).
         if !this.state.remote {
             return Poll::Pending;
         }
 
-        // we need to wait for more data to be available
-        // this hard limit is for simpler implementation. I am avoid complex flow-control window management
-        // other option is try to send as mush as possible with condition this.window.send == 0, but it lead to complex logic
+        // We need to wait for more capacity to be available.
+        // This implementation only sends in `DEFAULT_CHUNK_CAPACITY` sized increments.
         if this.window.send < DEFAULT_CHUNK_CAPACITY {
             return Poll::Pending;
         }
 
-        while let Poll::Ready(event) = this.rx.poll_next_unpin(cx) {
-            match event {
-                Some(chunk) => {
-                    this.outs.push_back(FrameStreamEvent::Data(Flags::empty(), chunk.len() as u32));
-                    this.outs.push_back(FrameStreamEvent::DataChunk(chunk));
-                }
-                None => {
-                    log::warn!("[YamuxStreamHead] rx unexpected None");
-                    return Poll::Ready(None);
+        if this.state.local {
+            while let Poll::Ready(event) = this.rx.poll_next_unpin(cx) {
+                match event {
+                    Some(chunk) => {
+                        this.window.send = this.window.send.saturating_sub(chunk.len());
+                        this.outs.push_back(FrameStreamEvent::Data(Flags::empty(), chunk.len() as u32));
+                        this.outs.push_back(FrameStreamEvent::DataChunk(chunk));
+                    }
+                    None => {
+                        // Local side closed: send FIN once and keep the stream alive for inbound reads.
+                        this.state.local = false;
+                        this.outs.push_back(FrameStreamEvent::Data(Flags::fin(), 0));
+                        break;
+                    }
                 }
             }
         }
@@ -305,43 +328,185 @@ pub(crate) fn accept_stream() -> (YamuxStreamHead, YamuxStream) {
 
 #[cfg(test)]
 mod tests {
+    //! Stream tests are written as small, deterministic state-machine checks.
+    //!
+    //! Design goals:
+    //! - Do not run an async runtime.
+    //! - Drive state via `poll_*` with a `noop_waker` and an explicit [`Context`].
+    //! - Keep poll counts small and predictable: most assertions are satisfied by the
+    //!   very next `poll_next_unpin` call, otherwise we expect `Poll::Pending`.
+    //! - Prefer validating observable protocol events ([`FrameStreamEvent`]) over
+    //!   asserting on internal fields.
+
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use futures::{AsyncWrite, StreamExt, task::noop_waker};
+
+    use crate::{
+        chunk::DEFAULT_CHUNK_CAPACITY,
+        frame::FrameStreamEvent,
+        packet::Flags,
+        stream::{DEFAULT_WINDOW_UPDATE_THRESHOLD, INITIAL_WINDOW, YamuxStreamHeadError, accept_stream, open_stream},
+    };
+
     #[test]
+    /// `open_stream()` immediately emits its initial `WindowUpdate(SYN, INITIAL_WINDOW)`.
+    ///
+    /// After that, it must remain `Pending` for application-data emission until the
+    /// remote side acknowledges the stream (simulated by an inbound `ACK`).
     fn open_stream_should_wait_remote_open() {
-        //TODO
+        let (mut head, _stream) = open_stream();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::syn(), INITIAL_WINDOW))));
+        assert!(matches!(head.poll_next_unpin(&mut cx), Poll::Pending));
+        assert_eq!(head.state.remote, false);
+        assert_eq!(head.on_input(FrameStreamEvent::WindowUpdate(Flags::ack(), 0)), Ok(()));
+
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Pending);
+        assert_eq!(head.state.remote, true);
     }
 
     #[test]
+    /// `accept_stream()` immediately emits its initial `WindowUpdate(ACK, INITIAL_WINDOW)`.
+    ///
+    /// A single `poll_write` on the user-facing [`YamuxStream`] should enqueue exactly
+    /// one DATA header followed by one DATA chunk in the head's output stream.
     fn accept_stream_should_able_to_send_data() {
-        //TODO
+        let (mut head, mut stream) = accept_stream();
+        // remote already open when accept_stream
+        assert_eq!(head.state.remote, true);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::ack(), INITIAL_WINDOW))));
+
+        let payload = b"hello-stream";
+        assert_eq!(Pin::new(&mut stream).poll_write(&mut cx, payload).map_err(|e| e.to_string()), Poll::Ready(Ok(payload.len())));
+
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::Data(Flags::empty(), payload.len() as u32))));
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::DataChunk(payload.to_vec().into()))));
     }
 
     #[test]
+    /// Dropping the user-facing stream closes the local half.
+    ///
+    /// The head should emit exactly one `FIN` (represented as a DATA header with the
+    /// `FIN` flag and `size = 0`), then stop producing further events until something
+    /// else changes (e.g. inbound frames).
     fn haft_close_should_send_fin() {
-        //TODO
+        let (mut head, stream) = accept_stream();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Drain initial ACK.
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::ack(), INITIAL_WINDOW))));
+
+        drop(stream);
+
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::Data(Flags::fin(), 0))));
+
+        // FIN is only emitted once.
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Pending);
     }
 
     #[test]
+    /// A DATA header declares a byte count that must be matched by subsequent DATA chunks.
+    ///
+    /// This test sends a header with `size = 1` but follows with a chunk of length 2,
+    /// which must be rejected with `InvalidData`.
     fn wrong_data_chunk_size_should_return_error() {
-        //TODO
+        let (mut head, _stream) = accept_stream();
+
+        assert_eq!(head.on_input(FrameStreamEvent::Data(Flags::empty(), 1)), Ok(()));
+
+        assert_eq!(head.on_input(FrameStreamEvent::DataChunk(vec![0u8, 1u8].into())), Err(YamuxStreamHeadError::InvalidDataChunkSize));
     }
 
     #[test]
+    /// Receiving a DATA chunk without first receiving a DATA header is invalid.
     fn wrong_data_chunk_state_should_return_error() {
-        //TODO
+        let (mut head, _stream) = accept_stream();
+
+        assert_eq!(head.on_input(FrameStreamEvent::DataChunk(vec![0u8].into())), Err(YamuxStreamHeadError::InvalidFrameType));
     }
 
     #[test]
+    /// Outbound sending is gated by the head's `send` window.
+    ///
+    /// When the available send window drops below one chunk, the head must return
+    /// `Poll::Pending` and not emit partial frames.
     fn should_pending_after_exceed_window() {
-        //TODO
+        let (mut head, mut stream) = accept_stream();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Drain initial ACK.
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::ack(), INITIAL_WINDOW))));
+
+        head.window.send = DEFAULT_CHUNK_CAPACITY - 1;
+
+        let payload = vec![7u8; DEFAULT_CHUNK_CAPACITY];
+        assert_eq!(Pin::new(&mut stream).poll_write(&mut cx, &payload).map_err(|e| e.to_string()), Poll::Ready(Ok(DEFAULT_CHUNK_CAPACITY)));
+
+        // head is pending because of window is limited
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Pending);
     }
 
     #[test]
+    /// Inbound data consumption should trigger window updates once enough bytes are received.
+    ///
+    /// This test preloads the internal receive counter near the threshold, then delivers
+    /// one full chunk to cross it, expecting the next polled output to be `WindowUpdate`.
     fn should_send_window_update_after_received_large_data() {
-        //TODO
+        let (mut head, _stream) = accept_stream();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Drain initial ACK.
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::ack(), INITIAL_WINDOW))));
+
+        head.window.recv = DEFAULT_WINDOW_UPDATE_THRESHOLD as usize - DEFAULT_CHUNK_CAPACITY;
+
+        assert_eq!(head.on_input(FrameStreamEvent::Data(Flags::empty(), DEFAULT_CHUNK_CAPACITY as u32)), Ok(()));
+        assert_eq!(head.on_input(FrameStreamEvent::DataChunk(vec![0u8; DEFAULT_CHUNK_CAPACITY].into())), Ok(()));
+
+        assert_eq!(
+            head.poll_next_unpin(&mut cx),
+            Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::ack(), DEFAULT_WINDOW_UPDATE_THRESHOLD)))
+        );
     }
 
     #[test]
+    /// A `WindowUpdate` increases the send window and should unblock pending outbound data.
+    ///
+    /// We first force the head into a "not enough window" state (expecting `Pending`),
+    /// then simulate an inbound `WindowUpdate(delta = 1)` that makes exactly one chunk
+    /// sendable again.
     fn should_able_to_send_after_received_window_update() {
-        //TODO
+        let (mut head, mut stream) = accept_stream();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Drain initial ACK.
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::WindowUpdate(Flags::ack(), INITIAL_WINDOW))));
+
+        head.window.send = DEFAULT_CHUNK_CAPACITY - 1;
+
+        let payload = vec![9u8; DEFAULT_CHUNK_CAPACITY];
+        assert_eq!(Pin::new(&mut stream).poll_write(&mut cx, &payload).map_err(|e| e.to_string()), Poll::Ready(Ok(DEFAULT_CHUNK_CAPACITY)));
+
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Pending);
+
+        assert_eq!(head.on_input(FrameStreamEvent::WindowUpdate(Flags::empty(), 1)), Ok(()));
+
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::Data(Flags::empty(), DEFAULT_CHUNK_CAPACITY as u32))));
+
+        assert_eq!(head.poll_next_unpin(&mut cx), Poll::Ready(Some(FrameStreamEvent::DataChunk(payload.into()))));
     }
 }

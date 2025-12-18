@@ -151,6 +151,12 @@ impl From<Vec<u8>> for ChunkView {
     }
 }
 
+impl From<&[u8]> for ChunkView {
+    fn from(value: &[u8]) -> Self {
+        ChunkView::from(ChunkOwned::from(value.to_vec()))
+    }
+}
+
 impl ChunkView {
     /// Borrows a narrower view of this chunk.
     ///

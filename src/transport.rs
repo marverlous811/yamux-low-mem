@@ -127,6 +127,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxTransport<T> {
 
 #[cfg(test)]
 mod tests {
+    //! Transport tests focus on polling semantics and frame round-tripping.
+    //!
+    //! We intentionally avoid async/await: the transport itself is a `Sink<Frame> + Stream<Item = Frame>`,
+    //! so we drive it via `poll_*` with a `noop_waker` to keep the number of polls small and predictable.
+
     use std::task::{Context, Poll};
 
     use futures::{SinkExt, StreamExt, task::noop_waker};
@@ -139,6 +144,12 @@ mod tests {
     };
 
     #[test]
+    /// Writes a single frame into one transport and reads it back from the peer transport.
+    ///
+    /// This test is deliberately "one hop":
+    /// - `poll_ready` must be `Ready` before `start_send`.
+    /// - `poll_flush` must be `Ready` to ensure bytes are pushed into the underlying stream.
+    /// - The peer must yield exactly one frame on the next `poll_next`.
     fn pipe_2_streams() {
         let (left, right) = tokio::io::duplex(64 * 1024);
         let mut left = YamuxTransport::new(left.compat(), 64 * 1024);

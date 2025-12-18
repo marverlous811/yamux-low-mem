@@ -16,7 +16,7 @@ use futures::{AsyncRead, AsyncWrite, SinkExt, Stream, StreamExt};
 
 use crate::{
     frame::{Frame, FrameSessionEvent},
-    packet::{FlagsBuilder, StreamID},
+    packet::{Flags, StreamID},
     stream::{YamuxStream, YamuxStreamHead, accept_stream, open_stream},
     transport::YamuxTransport,
 };
@@ -112,7 +112,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
                     Frame::Session(event) => match event {
                         FrameSessionEvent::Ping(flags, code) => {
                             if flags.syn {
-                                this.out_queue.push_back(Frame::Session(FrameSessionEvent::Ping(FlagsBuilder::new().with_ack(true).build(), code)));
+                                this.out_queue.push_back(Frame::Session(FrameSessionEvent::Ping(Flags::ack(), code)));
                             } else if flags.ack {
                                 log::info!("[YamuxSession] got pong");
                             }

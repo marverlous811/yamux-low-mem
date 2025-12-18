@@ -249,6 +249,7 @@ impl Stream for YamuxStreamHead {
 // === User-facing stream handle ===
 
 /// User-facing half of a logical Yamux stream.
+#[derive(Debug)]
 pub struct YamuxStream {
     tx: Sender<ChunkView>,
     rx: UnboundedReceiver<ChunkView>,

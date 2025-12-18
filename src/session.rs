@@ -88,12 +88,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
         let this = self.get_mut();
 
         // first try to send
+        let mut sent = false;
         while !this.out_queue.is_empty() && this.transport.poll_ready_unpin(cx).is_ready() {
             let out = this.out_queue.pop_front().expect("must have pop after check is_empty");
             if let Err(e) = this.transport.start_send_unpin(out) {
                 log::error!("[YamuxSession] transport send frame error {e}");
                 return Poll::Ready(None);
             }
+            sent = true;
         }
 
         // we need to wait all pkt (end with GoAway) is sent
@@ -178,6 +180,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
                 log::error!("[YamuxSession] transport send frame error {e}");
                 return Poll::Ready(None);
             }
+            sent = true;
+        }
+
+        if sent && let Poll::Ready(Err(e)) = this.transport.poll_flush_unpin(cx) {
+            log::error!("[YamuxSession] transport flush frame error {e}");
+            return Poll::Ready(None);
         }
 
         Poll::Pending
@@ -186,13 +194,55 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
 
 #[cfg(test)]
 mod tests {
+    //! Session tests are deterministic `poll_*` state-machine checks, similar to the stream and
+    //! transport modules.
+    //!
+    //! Goals:
+    //! - Avoid async/await and scheduling-dependent behavior.
+    //! - Drive `YamuxSession` via `poll_next_unpin` using a `noop_waker`.
+    //! - Make backpressure explicit by wrapping I/O so `poll_write` returns `Pending` a known
+    //!   number of times.
+    //! - Assert on externally observable effects (stream acceptance, GoAway-driven shutdown).
+
+    use std::task::{Context, Poll};
+
+    use futures::StreamExt;
+    use futures::task::noop_waker;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+
+    use crate::session::YamuxSession;
+
     #[test]
     fn should_able_to_open_stream_and_receive_stream() {
-        //TODO: create 2 session, open stream from client, accept stream from server
+        let (left, right) = tokio::io::duplex(64 * 1024);
+        let mut client = YamuxSession::client(left.compat(), 64 * 1024);
+        let mut server = YamuxSession::server(right.compat(), 64 * 1024);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Opening a stream is a local API call; the "wire-visible" SYN only appears once the
+        // session is polled and flushes the head's initial WindowUpdate frame.
+        let _client_stream = client.open_stream();
+        assert!(matches!(client.poll_next_unpin(&mut cx), Poll::Pending));
+
+        // Server should yield the accepted stream
+        assert!(matches!(server.poll_next_unpin(&mut cx), Poll::Ready(Some(_))));
     }
 
     #[test]
     fn should_able_to_close_and_wait_sent_out() {
-        //TODO: create 2 session, close manual, wait sent out
+        let (left, right) = tokio::io::duplex(64 * 1024);
+
+        let mut client = YamuxSession::client(left.compat(), 64 * 1024);
+        let mut server = YamuxSession::server(right.compat(), 64 * 1024);
+
+        client.close(0);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(client.poll_next_unpin(&mut cx), Poll::Ready(None)));
+        assert!(matches!(server.poll_next_unpin(&mut cx), Poll::Ready(None)));
     }
 }

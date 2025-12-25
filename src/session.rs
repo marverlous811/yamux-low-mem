@@ -10,9 +10,11 @@ use std::{
     collections::{HashMap, VecDeque},
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use futures::{AsyncRead, AsyncWrite, SinkExt, Stream, StreamExt};
+use tokio::time::Interval;
 
 use crate::{
     frame::{Frame, FrameSessionEvent},
@@ -20,6 +22,15 @@ use crate::{
     stream::{YamuxStream, YamuxStreamHead, accept_stream, open_stream},
     transport::YamuxTransport,
 };
+
+mod rtt;
+pub use rtt::KeepAliveConfig;
+
+#[derive(Debug, Clone)]
+pub struct YamuxSessionConfig {
+    pub max_write_buffer: usize,
+    pub keep_alive_config: Option<KeepAliveConfig>,
+}
 
 // === Session type ===
 
@@ -30,32 +41,38 @@ pub struct YamuxSession<T: AsyncRead + AsyncWrite + Unpin> {
     next_stream_id: u32,
     out_queue: VecDeque<Frame>,
     manual_close: bool,
+    rtt: rtt::Rtt,
+    interval: Option<KeepAliveInterval>,
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> YamuxSession<T> {
     /// Creates a server-side session (even stream identifiers).
-    pub fn server(stream: T, max_write_buffer: usize) -> Self {
-        Self::new(stream, true, max_write_buffer)
+    pub fn server(stream: T, cfg: YamuxSessionConfig) -> Self {
+        Self::new(stream, true, cfg)
     }
 
     /// Creates a client-side session (odd stream identifiers).
-    pub fn client(stream: T, max_write_buffer: usize) -> Self {
-        Self::new(stream, false, max_write_buffer)
+    pub fn client(stream: T, cfg: YamuxSessionConfig) -> Self {
+        Self::new(stream, false, cfg)
     }
 
     /// Creates a session and selects the next outbound stream identifier.
-    fn new(stream: T, is_server: bool, max_write_buffer: usize) -> Self {
+    fn new(stream: T, is_server: bool, cfg: YamuxSessionConfig) -> Self {
         let start = if is_server {
             2
         } else {
             1
         };
+
+        let interval = cfg.keep_alive_config.as_ref().map(|_| KeepAliveInterval::new(Duration::from_secs(1)));
         Self {
-            transport: YamuxTransport::new(stream, max_write_buffer),
+            transport: YamuxTransport::new(stream, cfg.max_write_buffer),
             streams: HashMap::new(),
             next_stream_id: start,
             out_queue: VecDeque::new(),
             manual_close: false,
+            rtt: rtt::Rtt::new(cfg.keep_alive_config.unwrap_or_default()),
+            interval,
         }
     }
 
@@ -83,6 +100,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxSession<T> {
         self.out_queue.push_back(Frame::Session(FrameSessionEvent::GoAway(code)));
         self.manual_close = true;
     }
+
+    pub fn on_ping(&mut self, flags: Flags, code: u32) {
+        if flags.ack {
+            // pong received
+            let is_valid = self.rtt.handle_pong(code);
+            if !is_valid {
+                log::info!("[YamuxSession] received invalid pong nonce {}, close session", code);
+                self.close(0);
+            }
+        } else if flags.syn {
+            // ping received, send pong
+            log::info!("[YamuxSession] enqueue pong frame");
+            self.out_queue.push_back(Frame::Session(FrameSessionEvent::Ping(Flags::ack(), code)));
+        }
+    }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
@@ -90,6 +122,34 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
+        // check keep-alive
+        let tick_event = if let Some(interval) = &mut this.interval {
+            match Pin::new(interval).as_mut().poll_next(cx) {
+                Poll::Pending => SessionTickEvent::Idle,
+                Poll::Ready(Some(())) => {
+                    log::info!("[YamuxSession] keep-alive interval tick");
+                    if let Some(event) = this.rtt.next_ping() {
+                        match event {
+                            rtt::RttEvent::KeepAlive(nonce) => {
+                                log::info!("[YamuxSession] enqueue ping frame");
+                                this.out_queue.push_back(Frame::Session(FrameSessionEvent::Ping(Flags::syn(), nonce)));
+                                SessionTickEvent::NeedWake
+                            }
+                            rtt::RttEvent::Close => {
+                                log::info!("[YamuxSession] keep-alive timeout, close session");
+                                SessionTickEvent::Close
+                            }
+                        }
+                    } else {
+                        SessionTickEvent::NeedWake
+                    }
+                }
+                Poll::Ready(None) => SessionTickEvent::Close,
+            }
+        } else {
+            SessionTickEvent::Idle
+        };
 
         // first try to send
         let mut sent = false;
@@ -117,12 +177,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
                 Some(Ok(frame)) => match frame {
                     Frame::Session(event) => match event {
                         FrameSessionEvent::Ping(flags, code) => {
-                            if flags.syn {
-                                log::debug!("[YamuxSession] got ping => answer");
-                                this.out_queue.push_back(Frame::Session(FrameSessionEvent::Ping(Flags::ack(), code)));
-                            } else if flags.ack {
-                                log::debug!("[YamuxSession] got pong");
-                            }
+                            this.on_ping(flags, code);
                         }
                         FrameSessionEvent::GoAway(code) => {
                             log::debug!("[YamuxSession] close with code {code}");
@@ -199,13 +254,51 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
             return Poll::Ready(None);
         }
 
-        Poll::Pending
+        match tick_event {
+            SessionTickEvent::Close => {
+                this.close(0);
+                Poll::Pending
+            }
+            SessionTickEvent::NeedWake => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            SessionTickEvent::Idle => Poll::Pending,
+        }
     }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Drop for YamuxSession<T> {
     fn drop(&mut self) {
         log::info!("[YamuxSession] drop");
+    }
+}
+
+enum SessionTickEvent {
+    Idle,
+    NeedWake,
+    Close,
+}
+
+struct KeepAliveInterval {
+    interval: Interval,
+}
+
+impl KeepAliveInterval {
+    fn new(duration: Duration) -> Self {
+        Self { interval: tokio::time::interval(duration) }
+    }
+}
+
+impl Stream for KeepAliveInterval {
+    type Item = ();
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.interval.poll_tick(cx) {
+            Poll::Ready(_) => Poll::Ready(Some(())),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -227,13 +320,18 @@ mod tests {
     use futures::task::noop_waker;
     use tokio_util::compat::TokioAsyncReadCompatExt;
 
-    use crate::session::YamuxSession;
+    use crate::session::{YamuxSession, YamuxSessionConfig};
 
     #[test]
     fn should_able_to_open_stream_and_receive_stream() {
         let (left, right) = tokio::io::duplex(64 * 1024);
-        let mut client = YamuxSession::client(left.compat(), 64 * 1024);
-        let mut server = YamuxSession::server(right.compat(), 64 * 1024);
+
+        let cfg = YamuxSessionConfig {
+            max_write_buffer: 64 * 1024,
+            keep_alive_config: None,
+        };
+        let mut client = YamuxSession::client(left.compat(), cfg.clone());
+        let mut server = YamuxSession::server(right.compat(), cfg);
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -251,8 +349,13 @@ mod tests {
     fn should_able_to_close_and_wait_sent_out() {
         let (left, right) = tokio::io::duplex(64 * 1024);
 
-        let mut client = YamuxSession::client(left.compat(), 64 * 1024);
-        let mut server = YamuxSession::server(right.compat(), 64 * 1024);
+        let cfg = YamuxSessionConfig {
+            max_write_buffer: 64 * 1024,
+            keep_alive_config: None,
+        };
+
+        let mut client = YamuxSession::client(left.compat(), cfg.clone());
+        let mut server = YamuxSession::server(right.compat(), cfg);
 
         client.close(0);
 

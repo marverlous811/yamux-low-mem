@@ -80,7 +80,11 @@ async fn serve_one(tcp: TcpStream, peer: SocketAddr, args: Args, counters: Arc<b
     tcp.set_nodelay(true).ok();
     counters.inc_sessions();
 
-    let mut session = YamuxSession::server(tcp.compat(), args.max_write_buffer);
+    let cfg = yamux_low_mem::session::YamuxSessionConfig {
+        max_write_buffer: args.max_write_buffer,
+        keep_alive_config: None,
+    };
+    let mut session = YamuxSession::server(tcp.compat(), cfg);
     let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
     for _ in 0..args.streams {

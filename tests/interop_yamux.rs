@@ -58,7 +58,11 @@ mod tests {
         let (left, right) = tokio::io::duplex(64 * 1024);
         let mut server = tokio_yamux::Session::new(left, tokio_yamux::Config::default(), tokio_yamux::session::SessionType::Server);
 
-        let mut client = yamux_low_mem::YamuxSession::client(right.compat(), 8096);
+        let cfg = yamux_low_mem::session::YamuxSessionConfig {
+            max_write_buffer: 8096,
+            keep_alive_config: None,
+        };
+        let mut client = yamux_low_mem::YamuxSession::client(right.compat(), cfg);
 
         tokio::spawn(async move {
             use futures::{AsyncReadExt, AsyncWriteExt};
@@ -97,7 +101,11 @@ mod tests {
         let (left, right) = tokio::io::duplex(64 * 1024);
         let mut server = tokio_yamux::Session::new(left, tokio_yamux::Config::default(), tokio_yamux::session::SessionType::Server);
 
-        let mut client = yamux_low_mem::YamuxSession::client(right.compat(), 8096);
+        let cfg = yamux_low_mem::session::YamuxSessionConfig {
+            max_write_buffer: 8096,
+            keep_alive_config: None,
+        };
+        let mut client = yamux_low_mem::YamuxSession::client(right.compat(), cfg);
 
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -136,8 +144,12 @@ mod tests {
 
         let (left, right) = tokio::io::duplex(64 * 1024);
         let mut server = tokio_yamux::Session::new(left, tokio_yamux::Config::default(), tokio_yamux::session::SessionType::Client);
+        let cfg = yamux_low_mem::session::YamuxSessionConfig {
+            max_write_buffer: 8096,
+            keep_alive_config: None,
+        };
 
-        let mut client = yamux_low_mem::YamuxSession::server(right.compat(), 8096);
+        let mut client = yamux_low_mem::YamuxSession::server(right.compat(), cfg);
 
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -176,8 +188,11 @@ mod tests {
 
         let (left, right) = tokio::io::duplex(64 * 1024);
         let mut server = tokio_yamux::Session::new(left, tokio_yamux::Config::default(), tokio_yamux::session::SessionType::Client);
-
-        let mut client = yamux_low_mem::YamuxSession::server(right.compat(), 8096);
+        let cfg = yamux_low_mem::session::YamuxSessionConfig {
+            max_write_buffer: 8096,
+            keep_alive_config: None,
+        };
+        let mut client = yamux_low_mem::YamuxSession::server(right.compat(), cfg);
 
         tokio::spawn(async move {
             use futures::{AsyncReadExt, AsyncWriteExt};

@@ -23,11 +23,15 @@
 //! ```no_run
 //! use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 //! use tokio_util::compat::TokioAsyncReadCompatExt;
-//! use yamux_low_mem::session::YamuxSession;
+//! use yamux_low_mem::session::{YamuxSession, YamuxSessionConfig};
 //!
 //! # async fn demo() -> std::io::Result<()> {
 //! let tcp = tokio::net::TcpStream::connect("127.0.0.1:8080").await?;
-//! let mut session = YamuxSession::client(tcp.compat(), 8 * 1024);
+//! let cfg = YamuxSessionConfig {
+//!     max_write_buffer: 8 * 1024,
+//!     keep_alive_config: None,
+//! };
+//! let mut session = YamuxSession::client(tcp.compat(), cfg);
 //! let mut stream = session.open_stream();
 //! stream.write_all(b"hello").await?;
 //! let mut buf = [0u8; 5];
@@ -42,5 +46,5 @@ pub mod session;
 pub mod stream;
 pub mod transport;
 
-pub use session::YamuxSession;
+pub use session::{YamuxSession, YamuxSessionConfig};
 pub use stream::YamuxStream;

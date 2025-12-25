@@ -88,7 +88,11 @@ async fn run_one(idx: usize, args: Args, counters: Arc<bench_common::Counters>) 
     tcp.set_nodelay(true).ok();
     counters.inc_sessions();
 
-    let mut session = YamuxSession::client(tcp.compat(), args.max_write_buffer);
+    let cfg = yamux_low_mem::session::YamuxSessionConfig {
+        max_write_buffer: args.max_write_buffer,
+        keep_alive_config: None,
+    };
+    let mut session = YamuxSession::client(tcp.compat(), cfg);
     let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
     for _ in 0..args.streams {

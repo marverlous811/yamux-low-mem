@@ -34,7 +34,11 @@ async fn main() -> anyhow::Result<()> {
     let transport = TcpStream::connect(args.yamux_server).await?;
     log::info!("connected to yamux server at {}", args.yamux_server);
 
-    let mut session = YamuxSession::client(transport.compat(), MAX_WRITE_BUFFER);
+    let cfg = yamux_low_mem::session::YamuxSessionConfig {
+        max_write_buffer: MAX_WRITE_BUFFER,
+        keep_alive_config: None,
+    };
+    let mut session = YamuxSession::client(transport.compat(), cfg);
     while let Some(stream) = session.next().await {
         let id = stream.stream_id();
         let target_addr = args.target_addr;

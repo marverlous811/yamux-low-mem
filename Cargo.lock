@@ -890,6 +890,7 @@ dependencies = [
  "derive_more",
  "futures",
  "log",
+ "parking_lot",
  "test-log",
  "thiserror",
  "tokio",

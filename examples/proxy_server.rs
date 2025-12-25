@@ -52,8 +52,12 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn serve_client(transport: TcpStream, http_bind: SocketAddr) -> anyhow::Result<()> {
+    let cfg = yamux_low_mem::session::YamuxSessionConfig {
+        max_write_buffer: MAX_WRITE_BUFFER,
+        keep_alive_config: None,
+    };
     let http_listener = TcpListener::bind(http_bind).await?;
-    let mut session = YamuxSession::server(transport.compat(), MAX_WRITE_BUFFER);
+    let mut session = YamuxSession::server(transport.compat(), cfg);
 
     loop {
         tokio::select! {

@@ -64,7 +64,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxSession<T> {
             1
         };
 
-        let interval = cfg.keep_alive_config.as_ref().map(|_| KeepAliveInterval::new(Duration::from_secs(1)));
+        let interval = cfg.keep_alive_config.as_ref().map(|c| KeepAliveInterval::new(c.interval));
         Self {
             transport: YamuxTransport::new(stream, cfg.max_write_buffer),
             streams: HashMap::new(),
@@ -127,7 +127,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
                     if let Some(event) = this.rtt.next_ping() {
                         match event {
                             rtt::RttEvent::KeepAlive(nonce) => {
-                                log::info!("[YamuxSession] enqueue ping frame");
+                                log::debug!("[YamuxSession] enqueue ping frame");
                                 this.out_queue.push_back(Frame::Session(FrameSessionEvent::Ping(Flags::syn(), nonce)));
                                 SessionTickEvent::NeedWake
                             }

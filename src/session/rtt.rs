@@ -62,7 +62,7 @@ impl Rtt {
         self.ping_seq += 1;
         let nonce = self.ping_seq;
 
-        log::info!("sending ping with nonce {}", nonce);
+        log::debug!("sending ping with nonce {}", nonce);
         *state = RttState::AwaitingPong { sent_at: Instant::now(), nonce };
         Some(RttEvent::KeepAlive(nonce))
     }
@@ -83,7 +83,7 @@ impl Rtt {
         }
 
         let rtt = sent_at.elapsed();
-        log::info!("received pong with nonce {}, rtt = {:?}", received_nonce, rtt);
+        log::debug!("received pong with nonce {}, rtt = {:?}", received_nonce, rtt);
 
         let next = Instant::now() + self.cfg.interval;
         inner.state = RttState::Waiting { next };

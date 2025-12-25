@@ -104,11 +104,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> YamuxSession<T> {
     pub fn on_ping(&mut self, flags: Flags, code: u32) {
         if flags.ack {
             // pong received
-            let is_valid = self.rtt.handle_pong(code);
-            if !is_valid {
-                log::info!("[YamuxSession] received invalid pong nonce {}, close session", code);
-                self.close(0);
-            }
+            self.rtt.handle_pong(code);
         } else if flags.syn {
             // ping received, send pong
             log::info!("[YamuxSession] enqueue pong frame");
@@ -128,7 +124,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for YamuxSession<T> {
             match Pin::new(interval).as_mut().poll_next(cx) {
                 Poll::Pending => SessionTickEvent::Idle,
                 Poll::Ready(Some(())) => {
-                    log::info!("[YamuxSession] keep-alive interval tick");
                     if let Some(event) = this.rtt.next_ping() {
                         match event {
                             rtt::RttEvent::KeepAlive(nonce) => {
